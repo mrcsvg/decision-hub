@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  database:
+    name: Schema e invariantes
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: decision_memory
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: decision_memory
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # O banco sobe vazio a cada execução: o schema é aplicado do zero e as
+      # invariantes rodam numa transação desfeita ao final.
+      - name: Aplicar o schema e rodar as invariantes
+        run: psql -v ON_ERROR_STOP=1 -f db/schema.sql -f db/test_invariants.sql
+
+  spec:
+    name: Exemplos contra o contrato
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Os extras de formato são obrigatórios: sem eles `date`, `email` e `uri`
+      # seriam apenas anotações e a validação passaria vazia.
+      - name: Instalar o validador
+        run: pip install "jsonschema[format]>=4.21,<5"
+
+      - name: Validar spec/examples contra o contrato
+        run: python scripts/validate_examples.py
+
+  links:
+    name: Links relativos
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verificar os links relativos dos arquivos .md
+        run: python scripts/check_links.py
