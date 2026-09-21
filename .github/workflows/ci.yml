@@ -34,7 +34,7 @@ jobs:
       PGDATABASE: decision_memory
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # O banco sobe vazio a cada execução: o schema é aplicado do zero e as
       # invariantes rodam numa transação desfeita ao final.
@@ -46,9 +46,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -65,9 +65,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
