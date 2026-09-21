@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:decision-memory:spec:experiment-record:v0",
+  "title": "Experiment Record v0",
+  "description": "Contrato de ingestão de resultados de experimento. Normaliza metadado e conclusão, nunca estatística: efeitos de fontes diferentes não são comparáveis entre si. Ver docs/adr/0003-normalizar-afirmacao.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["spec_version", "conformance_level", "source", "name", "started_on", "variants"],
+  "properties": {
+    "spec_version": {
+      "const": "0.1.0"
+    },
+    "conformance_level": {
+      "description": "Nível declarado pelo produtor. 0 = identificação; 1 = conhecimento consultável; 2 = resultado quantitativo.",
+      "type": "integer",
+      "enum": [0, 1, 2]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["system", "external_id"],
+      "properties": {
+        "system": {
+          "description": "Identificador da plataforma de origem. Ex.: growthbook, absmartly, internal.<nome>.",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "external_id": {
+          "description": "Id do experimento na origem. Junto com system, forma a chave de idempotência.",
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "description": "Link para o experimento na plataforma de origem.",
+          "type": "string",
+          "format": "uri"
+        }
+      }
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "experiment_type": {
+      "description": "Livre, por decisão de projeto: ab, multivariate, holdout, switchback ou o que a origem usar.",
+      "type": "string"
+    },
+    "started_on": {
+      "type": "string",
+      "format": "date"
+    },
+    "ended_on": {
+      "type": ["string", "null"],
+      "format": "date"
+    },
+    "variants": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "$ref": "#/$defs/variant" },
+      "contains": {
+        "type": "object",
+        "required": ["is_control"],
+        "properties": { "is_control": { "const": true } }
+      },
+      "minContains": 1,
+      "maxContains": 1
+    },
+    "hypothesis": {
+      "type": "string",
+      "minLength": 1
+    },
+    "owner": { "$ref": "#/$defs/person" },
+    "outcome": {
+      "enum": ["running", "ship", "rollback", "inconclusive", "iterate"]
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9 _./-]*$" },
+      "uniqueItems": true
+    },
+    "learning": {
+      "description": "O aprendizado em linguagem de negócio. É o único campo que exige escrita humana.",
+      "type": ["string", "null"]
+    },
+    "primary_metric": { "$ref": "#/$defs/metric" },
+    "effect": { "$ref": "#/$defs/effect" },
+    "segments": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/segment_result" }
+    },
+    "extensions": {
+      "description": "Escape hatch para semânticas que o contrato não modela. Nunca validado.",
+      "type": "object"
+    },
+    "raw_payload": {
+      "description": "Resposta original da origem, guardada sem transformação."
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "conformance_level": { "minimum": 1 } } },
+      "then": { "required": ["hypothesis", "owner", "outcome", "tags", "learning"] }
+    },
+    {
+      "if": { "properties": { "conformance_level": { "const": 2 } } },
+      "then": { "required": ["primary_metric", "effect"] }
+    },
+    {
+      "if": {
+        "required": ["outcome"],
+        "properties": { "outcome": { "enum": ["ship", "rollback", "inconclusive", "iterate"] } }
+      },
+      "then": {
+        "required": ["ended_on"],
+        "properties": { "ended_on": { "type": "string" } }
+      }
+    },
+    {
+      "if": {
+        "required": ["outcome"],
+        "properties": {
+          "conformance_level": { "minimum": 1 },
+          "outcome": { "enum": ["ship", "rollback", "inconclusive", "iterate"] }
+        }
+      },
+      "then": {
+        "properties": { "learning": { "type": "string", "minLength": 1 } }
+      }
+    }
+  ],
+  "$defs": {
+    "variant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "name", "is_control"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "is_control": { "type": "boolean" },
+        "allocation": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "person": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "email": { "type": "string", "format": "email" }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "direction"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "direction": { "enum": ["increase", "decrease"] },
+        "unit": { "type": "string" }
+      }
+    },
+    "effect": {
+      "description": "Estimativa como a origem a calculou. Nunca comparável com efeitos de outra origem.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["point", "method", "comparable_across_sources"],
+      "properties": {
+        "point": { "type": "number" },
+        "ci_low": { "type": "number" },
+        "ci_high": { "type": "number" },
+        "ci_level": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+        "relative": {
+          "description": "true se o efeito é relativo (lift), false se absoluto.",
+          "type": "boolean"
+        },
+        "method": {
+          "description": "Livre, como a origem declara: bayesian, frequentist, sequential, cuped...",
+          "type": "string",
+          "minLength": 1
+        },
+        "comparable_across_sources": {
+          "const": false
+        }
+      }
+    },
+    "segment_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["segment", "effect"],
+      "properties": {
+        "segment": { "type": "string", "minLength": 1 },
+        "effect": { "$ref": "#/$defs/effect" }
+      }
+    }
+  }
+}

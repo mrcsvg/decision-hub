@@ -1,0 +1,11 @@
+{
+  "spec_version": "0.1.0",
+  "conformance_level": 0,
+  "source": { "system": "internal.lab", "external_id": "exp-2024-0142" },
+  "name": "Checkout sem etapa de confirmação",
+  "started_on": "2024-03-04",
+  "variants": [
+    { "key": "control", "name": "Fluxo atual", "is_control": true },
+    { "key": "b", "name": "Sem confirmação", "is_control": false }
+  ]
+}

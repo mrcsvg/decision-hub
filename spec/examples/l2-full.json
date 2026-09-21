@@ -1,0 +1,40 @@
+{
+  "spec_version": "0.1.0",
+  "conformance_level": 2,
+  "source": {
+    "system": "growthbook",
+    "external_id": "exp_checkout_no_confirm",
+    "url": "https://growthbook.example.com/experiment/exp_checkout_no_confirm"
+  },
+  "name": "Checkout sem etapa de confirmação",
+  "experiment_type": "ab",
+  "started_on": "2024-03-04",
+  "ended_on": "2024-03-25",
+  "variants": [
+    { "key": "control", "name": "Fluxo atual", "is_control": true, "allocation": 0.5 },
+    { "key": "b", "name": "Sem confirmação", "is_control": false, "allocation": 0.5 }
+  ],
+  "hypothesis": "Remover a tela de confirmação reduz abandono sem aumentar pedidos cancelados.",
+  "owner": { "name": "Ana", "email": "ana@example.com" },
+  "outcome": "ship",
+  "tags": ["checkout", "conversao", "mobile"],
+  "learning": "Etapas de confirmação sem informação nova custam conversão; o risco de cancelamento não se materializou.",
+  "primary_metric": { "name": "conversão do checkout", "direction": "increase", "unit": "%" },
+  "effect": {
+    "point": 0.021,
+    "ci_low": 0.008,
+    "ci_high": 0.034,
+    "ci_level": 0.95,
+    "relative": true,
+    "method": "bayesian",
+    "comparable_across_sources": false
+  },
+  "segments": [
+    {
+      "segment": "mobile",
+      "effect": { "point": 0.031, "ci_low": 0.012, "ci_high": 0.05, "ci_level": 0.95, "relative": true, "method": "bayesian", "comparable_across_sources": false }
+    }
+  ],
+  "extensions": { "guardrail_cancelamentos": "sem alteração" },
+  "raw_payload": { "id": "exp_checkout_no_confirm", "status": "stopped", "results": "won" }
+}
