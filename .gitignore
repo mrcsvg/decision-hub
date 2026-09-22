@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Log de invocações do stub (dado de execução, não de repositório)
+server/run/

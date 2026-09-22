@@ -1,0 +1,38 @@
+[
+  {
+    "id": "ln-confirmacao",
+    "summary": "Etapas de confirmação que não trazem informação nova custam conversão e não reduzem cancelamento.",
+    "recorded_on": "2026-03-10",
+    "state": "attested",
+    "tags": ["checkout", "conversao"],
+    "from_decisions": ["dec-remover-confirmacao"],
+    "from_evidence": ["ev-checkout-confirm", "ev-checkout-entrevistas"]
+  },
+  {
+    "id": "ln-paginas",
+    "summary": "Reduzir o número de páginas não reduz o esforço percebido: o abandono migra para dentro do formulário mais longo.",
+    "recorded_on": "2025-10-06",
+    "state": "attested",
+    "tags": ["checkout", "conversao", "formulario"],
+    "from_decisions": ["dec-remover-confirmacao"],
+    "from_evidence": ["ev-checkout-pagina-unica"]
+  },
+  {
+    "id": "ln-onboarding",
+    "summary": "Ativação responde a redução de esforço na primeira sessão, não a explicação adicional sobre os campos.",
+    "recorded_on": "2026-06-15",
+    "state": "attested",
+    "tags": ["onboarding", "ativacao"],
+    "from_decisions": ["dec-onboarding-tres-etapas"],
+    "from_evidence": ["ev-onboarding-tres-etapas", "ev-onboarding-tooltips"]
+  },
+  {
+    "id": "ln-push-proposta",
+    "summary": "Frequência diária de notificação aparece associada a desinstalação em entrevistas; falta medição.",
+    "recorded_on": "2026-09-19",
+    "state": "proposed",
+    "tags": ["notificacoes", "retencao"],
+    "from_decisions": ["dec-push-diario"],
+    "from_evidence": ["ev-push-entrevistas"]
+  }
+]

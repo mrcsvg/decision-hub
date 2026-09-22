@@ -1,0 +1,8 @@
+# Dependências do stub. Instale num virtualenv:
+#   python -m venv .venv && .venv/bin/pip install -r server/requirements.txt
+mcp>=2.2,<3
+pydantic>=2.7,<3
+
+# Só para rodar os testes:
+pytest>=8,<9
+jsonschema[format]>=4.21,<5

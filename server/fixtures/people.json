@@ -1,0 +1,6 @@
+[
+  { "id": "p-ana",   "name": "Ana Ribeiro",   "email": "ana@exemplo.com.br" },
+  { "id": "p-bruno", "name": "Bruno Tavares", "email": "bruno@exemplo.com.br" },
+  { "id": "p-carla", "name": "Carla Menezes", "email": "carla@exemplo.com.br" },
+  { "id": "p-diego", "name": "Diego Alencar", "email": "diego@exemplo.com.br" }
+]
