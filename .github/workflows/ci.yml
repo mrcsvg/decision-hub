@@ -73,3 +73,22 @@ jobs:
 
       - name: Verificar os links relativos dos arquivos .md
         run: python scripts/check_links.py
+
+  stub:
+    name: Stub do servidor MCP
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Instalar as dependências do stub
+        run: pip install -r server/requirements.txt
+
+      # Além do comportamento das ferramentas, a suíte valida o corpus de
+      # fixtures contra spec/experiment-record-v0.schema.json.
+      - name: Rodar os testes do stub
+        run: python -m pytest server/tests -q

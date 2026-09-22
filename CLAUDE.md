@@ -5,9 +5,11 @@ Superfície MCP em [`MCP_TOOLS.md`](MCP_TOOLS.md), contrato de ingestão em
 [`spec/README.md`](spec/README.md). Leia antes de mudar qualquer coisa. Não
 repita o conteúdo deles aqui.
 
-Estado: v0, especificação e modelo de dados. Não há servidor. O que vem depois
-está em [Próximos passos](docs/concepcao.md#próximos-passos) — não antecipe etapa
-sem combinar.
+Estado: v0, especificação e modelo de dados. Não há servidor: o que existe em
+[`server/`](server/README.md) é um stub sobre fixtures, andaime para medir se o
+agente chama as ferramentas na hora certa. O que vem depois está em
+[Próximos passos](docs/concepcao.md#próximos-passos) — não antecipe etapa sem
+combinar.
 
 ## Especificação
 
@@ -30,7 +32,11 @@ Isso é atestação humana, por princípio do próprio projeto
 ## Ferramentas MCP
 
 - São seis. Não crie a sétima sem ADR.
-- Nenhuma ferramenta recebe confiança ou expectativa como parâmetro.
+- Nenhuma ferramenta recebe confiança ou expectativa como parâmetro — nem para
+  recusar: o que está no schema de entrada é convite para o agente preencher.
+- O stub em `server/` responde as seis a partir de fixtures. Mudou descrição de
+  ferramenta, mude nos dois lugares e diga no PR em que situação o agente
+  deixava de chamá-la.
 
 ## Fontes externas
 
@@ -56,7 +62,7 @@ Isso é atestação humana, por princípio do próprio projeto
 
 ## Rodar os testes
 
-Os três abaixo são exatamente o que a CI roda
+Os quatro abaixo são exatamente o que a CI roda
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 ### Invariantes do banco
@@ -98,4 +104,13 @@ código.
 
 ```bash
 python scripts/check_links.py
+```
+
+### Stub do servidor MCP
+
+A suíte também valida o corpus de fixtures contra o contrato de ingestão.
+
+```bash
+pip install -r server/requirements.txt
+python -m pytest server/tests -q
 ```

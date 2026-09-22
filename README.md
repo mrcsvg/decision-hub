@@ -41,9 +41,10 @@ Existem boas ferramentas para cada tipo de evidência isolado — plataformas de
 ├── spec/
 │   ├── experiment-record-v0.schema.json
 │   └── examples/
-└── db/
-    ├── schema.sql                     modelo lógico em PostgreSQL
-    └── test_invariants.sql
+├── db/
+│   ├── schema.sql                     modelo lógico em PostgreSQL
+│   └── test_invariants.sql
+└── server/                            stub MCP sobre fixtures, para testar invocação
 ```
 
 ## Rodar o schema
@@ -69,7 +70,7 @@ Este projeto registra as próprias decisões no formato que propõe. Todas estã
 
 ## Estado
 
-v0 — especificação e modelo de dados. Sem servidor implementado ainda. Próximos passos em [`docs/concepcao.md`](docs/concepcao.md#próximos-passos).
+v0 — especificação e modelo de dados. Sem servidor implementado ainda: o que há em [`server/`](server/README.md) é um stub que responde as seis ferramentas a partir de fixtures fictícias, para medir se um agente as invoca no momento certo antes de existir backend. Próximos passos em [`docs/concepcao.md`](docs/concepcao.md#próximos-passos).
 
 ## Licença
 
