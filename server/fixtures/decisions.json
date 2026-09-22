@@ -1,0 +1,185 @@
+[
+  {
+    "id": "dec-remover-confirmacao",
+    "slug": "remover-confirmacao-checkout",
+    "title": "Remover a etapa de confirmação do checkout",
+    "context": "A maior queda do funil está entre o resumo do pedido e a confirmação. A tela de confirmação repete o que o resumo já mostra.",
+    "description": "Remover a tela de confirmação para todos os clientes, mantendo o resumo do pedido como última etapa antes do pagamento.",
+    "door": "two_way",
+    "decided_on": "2026-03-10",
+    "decider": "p-ana",
+    "project": "proj-checkout",
+    "state": "attested",
+    "tags": ["checkout", "conversao"],
+    "alternatives": [
+      {
+        "description": "Manter a confirmação apenas para pedidos acima de R$ 500",
+        "rejection_reason": "Cria dois fluxos para manter e a evidência não separou o efeito por faixa de valor."
+      },
+      {
+        "description": "Colapsar todo o checkout numa página única",
+        "rejection_reason": "Já foi testado em 2025 e derrubou a conversão; ver o experimento exp-2025-0311."
+      }
+    ],
+    "evidence": [
+      { "evidence_id": "ev-checkout-confirm", "role": "supports", "weight": 0.9, "note": "Experimento controlado, resultado consistente no agregado." },
+      { "evidence_id": "ev-checkout-coorte", "role": "supports", "weight": 0.5, "note": "Localiza a queda exatamente nessa etapa." },
+      { "evidence_id": "ev-checkout-entrevistas", "role": "supports", "weight": 0.3, "note": "Explica o porquê, mas amostra pequena." },
+      { "evidence_id": "ev-checkout-pagina-unica", "role": "contradicts", "weight": 0.6, "note": "Alerta de que mexer na estrutura do checkout já saiu caro uma vez." }
+    ],
+    "learnings": ["ln-confirmacao", "ln-paginas"],
+    "expectation": {
+      "recorded_by": "p-ana",
+      "recorded_at": "2026-03-10T14:20:00-03:00",
+      "confidence": 0.7,
+      "expected_metric": "conversão do checkout",
+      "expected_magnitude": "+2 pontos percentuais",
+      "due_on": "2026-09-18"
+    }
+  },
+  {
+    "id": "dec-onboarding-tres-etapas",
+    "slug": "onboarding-tres-etapas",
+    "title": "Encurtar o onboarding para três etapas",
+    "context": "A ativação em sete dias está estagnada há dois trimestres e o onboarding tem sete etapas.",
+    "description": "Reduzir o onboarding para três etapas, adiando a coleta de preferências para depois da primeira compra.",
+    "door": "two_way",
+    "decided_on": "2026-06-15",
+    "decider": "p-carla",
+    "project": "proj-ativacao",
+    "state": "attested",
+    "tags": ["onboarding", "ativacao"],
+    "alternatives": [
+      {
+        "description": "Manter as sete etapas e explicar cada campo com tooltip",
+        "rejection_reason": "Testado e inconclusivo: explicação não substituiu redução de esforço."
+      }
+    ],
+    "evidence": [
+      { "evidence_id": "ev-onboarding-tres-etapas", "role": "supports", "weight": 0.8, "note": "Ativação subiu; retenção ficou em aberto." },
+      { "evidence_id": "ev-onboarding-tooltips", "role": "discarded", "weight": 0.2, "note": "Descartado como caminho alternativo." }
+    ],
+    "learnings": ["ln-onboarding"],
+    "expectation": {
+      "recorded_by": "p-carla",
+      "recorded_at": "2026-06-15T10:05:00-03:00",
+      "confidence": 0.6,
+      "expected_metric": "ativação em 7 dias",
+      "expected_magnitude": "+5 pontos percentuais, sem queda na retenção de 30 dias",
+      "due_on": "2026-09-15"
+    }
+  },
+  {
+    "id": "dec-frete-gratis-99",
+    "slug": "frete-gratis-99",
+    "title": "Baixar o piso do frete grátis para R$ 99",
+    "context": "O piso em R$ 149 está acima do ticket médio e o frete aparece como principal motivo de abandono declarado.",
+    "description": "Adotar R$ 99 como piso de frete grátis em todo o país, revisando em seis meses com a margem por faixa na mesa.",
+    "door": "two_way",
+    "decided_on": "2026-07-13",
+    "decider": "p-diego",
+    "project": "proj-precos",
+    "state": "attested",
+    "tags": ["frete", "precos", "conversao"],
+    "alternatives": [
+      {
+        "description": "Piso regional, variando por estado",
+        "rejection_reason": "Complexidade operacional alta e efeito não medido; fica para um segundo ciclo."
+      }
+    ],
+    "evidence": [
+      { "evidence_id": "ev-frete-gratis-99", "role": "supports", "weight": 0.9, "note": "Experimento com teste sequencial na própria plataforma." },
+      { "evidence_id": "ev-margem-por-faixa", "role": "contradicts", "weight": 0.7, "note": "A faixa que mais cresce é justamente a de menor margem." }
+    ],
+    "learnings": [],
+    "expectation": {
+      "recorded_by": "p-diego",
+      "recorded_at": "2026-07-13T16:40:00-03:00",
+      "confidence": 0.65,
+      "expected_metric": "receita líquida por sessão",
+      "expected_magnitude": "+3% sem queda de margem absoluta",
+      "due_on": "2026-12-10"
+    }
+  },
+  {
+    "id": "dec-push-diario",
+    "slug": "push-diario-ofertas",
+    "title": "Enviar notificação push diária de ofertas",
+    "context": "A retenção de 30 dias caiu dois pontos e a hipótese em discussão é aumentar a frequência de contato.",
+    "description": "Passar a enviar uma notificação push por dia com ofertas personalizadas.",
+    "door": "two_way",
+    "decided_on": "2026-09-19",
+    "decider": "p-bruno",
+    "project": "proj-ativacao",
+    "state": "proposed",
+    "tags": ["notificacoes", "retencao"],
+    "alternatives": [],
+    "evidence": [
+      { "evidence_id": "ev-push-entrevistas", "role": "contradicts", "weight": 0.4, "note": "Entrevistas associam frequência diária a desinstalação." }
+    ],
+    "learnings": ["ln-push-proposta"]
+  },
+  {
+    "id": "dec-busca-sinonimos",
+    "slug": "dicionario-sinonimos-busca",
+    "title": "Adotar dicionário de sinônimos na busca interna",
+    "context": "Quase metade das buscas sem resultado usa termo que existe no catálogo sob outro nome.",
+    "description": "Manter um dicionário de sinônimos curado pelo time de catálogo, revisado mensalmente.",
+    "door": "two_way",
+    "decided_on": "2026-02-20",
+    "decider": "p-bruno",
+    "project": "proj-busca",
+    "state": "attested",
+    "tags": ["busca", "conversao"],
+    "alternatives": [
+      {
+        "description": "Trocar o motor de busca por um serviço externo",
+        "rejection_reason": "Custo e prazo desproporcionais para um problema que se mostrou de vocabulário."
+      }
+    ],
+    "evidence": [
+      { "evidence_id": "ev-busca-sinonimos", "role": "supports", "weight": 0.8, "note": "" },
+      { "evidence_id": "ev-busca-zero-resultados", "role": "supports", "weight": 0.6, "note": "Dimensiona o problema antes do teste." }
+    ],
+    "learnings": [],
+    "expectation": {
+      "recorded_by": "p-bruno",
+      "recorded_at": "2026-02-20T09:15:00-03:00",
+      "confidence": 0.8,
+      "expected_metric": "buscas sem resultado",
+      "expected_magnitude": "-30%",
+      "due_on": "2026-06-30"
+    }
+  },
+  {
+    "id": "dec-manter-devolucao-30-dias",
+    "slug": "manter-devolucao-30-dias",
+    "title": "Manter o prazo de devolução em 30 dias",
+    "context": "Proposta de reduzir para os 7 dias exigidos por lei, para cortar custo de logística reversa.",
+    "description": "Manter os 30 dias. A redução não tem evidência de efeito sobre conversão e o prazo aparece na comunicação da marca.",
+    "door": "one_way",
+    "decided_on": "2026-05-06",
+    "decider": "p-ana",
+    "project": "proj-precos",
+    "state": "attested",
+    "tags": ["devolucao", "juridico"],
+    "alternatives": [
+      {
+        "description": "Reduzir para 7 dias, o mínimo legal",
+        "rejection_reason": "Sem evidência do efeito na conversão e com custo de marca difícil de reverter."
+      }
+    ],
+    "evidence": [
+      { "evidence_id": "ev-politica-devolucao", "role": "supports", "weight": 0.2, "note": "Documento, não medição. A decisão foi tomada sem evidência quantitativa." }
+    ],
+    "learnings": [],
+    "expectation": {
+      "recorded_by": "p-ana",
+      "recorded_at": "2026-05-06T11:00:00-03:00",
+      "confidence": 0.5,
+      "expected_metric": "conversão geral",
+      "expected_magnitude": "sem mudança detectável",
+      "due_on": "2027-01-15"
+    }
+  }
+]

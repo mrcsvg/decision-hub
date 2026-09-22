@@ -1,0 +1,288 @@
+[
+  {
+    "id": "ev-checkout-confirm",
+    "kind": "experiment",
+    "title": "Checkout sem etapa de confirmação",
+    "summary": "Remover a tela de confirmação subiu a conversão do checkout. Pedidos cancelados não se moveram.",
+    "url": "https://growthbook.exemplo.com.br/experiment/exp_checkout_no_confirm",
+    "source_system": "growthbook",
+    "external_id": "exp_checkout_no_confirm",
+    "strength": "causal",
+    "conformance_level": 2,
+    "tags": ["checkout", "conversao", "mobile"],
+    "record": {
+      "spec_version": "0.1.0",
+      "conformance_level": 2,
+      "source": {
+        "system": "growthbook",
+        "external_id": "exp_checkout_no_confirm",
+        "url": "https://growthbook.exemplo.com.br/experiment/exp_checkout_no_confirm"
+      },
+      "name": "Checkout sem etapa de confirmação",
+      "experiment_type": "ab",
+      "started_on": "2026-02-10",
+      "ended_on": "2026-03-03",
+      "variants": [
+        { "key": "control", "name": "Fluxo atual", "is_control": true, "allocation": 0.5 },
+        { "key": "b", "name": "Sem confirmação", "is_control": false, "allocation": 0.5 }
+      ],
+      "hypothesis": "Remover a tela de confirmação reduz abandono sem aumentar pedidos cancelados.",
+      "owner": { "name": "Ana Ribeiro", "email": "ana@exemplo.com.br" },
+      "outcome": "ship",
+      "tags": ["checkout", "conversao", "mobile"],
+      "learning": "Etapas de confirmação sem informação nova custam conversão; o risco de cancelamento não se materializou.",
+      "primary_metric": { "name": "conversão do checkout", "direction": "increase", "unit": "%" },
+      "effect": {
+        "point": 0.021,
+        "ci_low": 0.008,
+        "ci_high": 0.034,
+        "ci_level": 0.95,
+        "relative": true,
+        "method": "bayesian",
+        "comparable_across_sources": false
+      }
+    }
+  },
+  {
+    "id": "ev-checkout-pagina-unica",
+    "kind": "experiment",
+    "title": "Checkout em página única",
+    "summary": "Colapsar as quatro etapas do checkout numa página só derrubou a conversão. Revertido.",
+    "url": "https://lab.exemplo.com.br/experimentos/exp-2025-0311",
+    "source_system": "internal.lab",
+    "external_id": "exp-2025-0311",
+    "strength": "causal",
+    "conformance_level": 2,
+    "tags": ["checkout", "conversao"],
+    "record": {
+      "spec_version": "0.1.0",
+      "conformance_level": 2,
+      "source": { "system": "internal.lab", "external_id": "exp-2025-0311" },
+      "name": "Checkout em página única",
+      "experiment_type": "ab",
+      "started_on": "2025-09-01",
+      "ended_on": "2025-09-29",
+      "variants": [
+        { "key": "control", "name": "Quatro etapas", "is_control": true, "allocation": 0.5 },
+        { "key": "b", "name": "Página única", "is_control": false, "allocation": 0.5 }
+      ],
+      "hypothesis": "Menos páginas no checkout significa menos abandono.",
+      "owner": { "name": "Bruno Tavares", "email": "bruno@exemplo.com.br" },
+      "outcome": "rollback",
+      "tags": ["checkout", "conversao"],
+      "learning": "Reduzir o número de páginas não reduziu o esforço percebido: a página única ficou longa e o abandono migrou para o meio do formulário.",
+      "primary_metric": { "name": "conversão do checkout", "direction": "increase", "unit": "%" },
+      "effect": {
+        "point": -0.014,
+        "ci_low": -0.025,
+        "ci_high": -0.003,
+        "ci_level": 0.95,
+        "relative": true,
+        "method": "frequentist",
+        "comparable_across_sources": false
+      }
+    }
+  },
+  {
+    "id": "ev-checkout-entrevistas",
+    "kind": "study",
+    "title": "Oito entrevistas sobre abandono de carrinho",
+    "summary": "Participantes descrevem a tela de confirmação como repetição do que já viram. Ninguém citou insegurança sobre o pedido.",
+    "url": "https://pesquisa.exemplo.com.br/estudos/abandono-carrinho-2026",
+    "strength": "anecdotal",
+    "tags": ["checkout", "pesquisa"]
+  },
+  {
+    "id": "ev-checkout-coorte",
+    "kind": "analysis",
+    "title": "Funil de checkout por etapa, coorte de janeiro",
+    "summary": "A maior queda do funil está entre o resumo do pedido e a confirmação: 18% dos que chegam ao resumo não concluem.",
+    "url": "https://dados.exemplo.com.br/paineis/funil-checkout",
+    "strength": "correlational",
+    "tags": ["checkout", "conversao"]
+  },
+  {
+    "id": "ev-onboarding-tres-etapas",
+    "kind": "experiment",
+    "title": "Onboarding em três etapas",
+    "summary": "Encurtar o onboarding de sete para três etapas subiu a ativação em sete dias, mas o efeito na retenção de 30 dias ficou indefinido.",
+    "url": "https://lab.exemplo.com.br/experimentos/exp-2026-0088",
+    "source_system": "internal.lab",
+    "external_id": "exp-2026-0088",
+    "strength": "causal",
+    "conformance_level": 1,
+    "tags": ["onboarding", "ativacao"],
+    "record": {
+      "spec_version": "0.1.0",
+      "conformance_level": 1,
+      "source": { "system": "internal.lab", "external_id": "exp-2026-0088" },
+      "name": "Onboarding em três etapas",
+      "experiment_type": "ab",
+      "started_on": "2026-05-04",
+      "ended_on": "2026-06-01",
+      "variants": [
+        { "key": "control", "name": "Sete etapas", "is_control": true },
+        { "key": "b", "name": "Três etapas", "is_control": false }
+      ],
+      "hypothesis": "Encurtar o onboarding aumenta a ativação sem prejudicar a retenção.",
+      "owner": { "name": "Carla Menezes", "email": "carla@exemplo.com.br" },
+      "outcome": "iterate",
+      "tags": ["onboarding", "ativacao"],
+      "learning": "Ativação em sete dias subiu de forma consistente; a retenção de 30 dias não foi conclusiva no horizonte do teste e precisa de nova medição."
+    }
+  },
+  {
+    "id": "ev-onboarding-tooltips",
+    "kind": "experiment",
+    "title": "Tooltips explicativos no primeiro acesso",
+    "summary": "Explicar cada campo com tooltip não moveu a ativação. Inconclusivo.",
+    "url": "https://growthbook.exemplo.com.br/experiment/exp_onboarding_tooltips",
+    "source_system": "growthbook",
+    "external_id": "exp_onboarding_tooltips",
+    "strength": "causal",
+    "conformance_level": 2,
+    "tags": ["onboarding", "ativacao"],
+    "record": {
+      "spec_version": "0.1.0",
+      "conformance_level": 2,
+      "source": {
+        "system": "growthbook",
+        "external_id": "exp_onboarding_tooltips",
+        "url": "https://growthbook.exemplo.com.br/experiment/exp_onboarding_tooltips"
+      },
+      "name": "Tooltips explicativos no primeiro acesso",
+      "experiment_type": "ab",
+      "started_on": "2026-03-16",
+      "ended_on": "2026-04-13",
+      "variants": [
+        { "key": "control", "name": "Sem tooltip", "is_control": true, "allocation": 0.5 },
+        { "key": "b", "name": "Com tooltip", "is_control": false, "allocation": 0.5 }
+      ],
+      "hypothesis": "Explicar cada campo no primeiro acesso aumenta a ativação.",
+      "owner": { "name": "Carla Menezes", "email": "carla@exemplo.com.br" },
+      "outcome": "inconclusive",
+      "tags": ["onboarding", "ativacao"],
+      "learning": "Explicação não substitui redução de esforço: o intervalo cobriu zero e o tempo até a primeira ação não mudou.",
+      "primary_metric": { "name": "ativação em 7 dias", "direction": "increase", "unit": "%" },
+      "effect": {
+        "point": 0.003,
+        "ci_low": -0.009,
+        "ci_high": 0.015,
+        "ci_level": 0.95,
+        "relative": true,
+        "method": "bayesian",
+        "comparable_across_sources": false
+      }
+    }
+  },
+  {
+    "id": "ev-frete-gratis-99",
+    "kind": "experiment",
+    "title": "Frete grátis acima de noventa e nove reais",
+    "summary": "Piso de frete grátis em R$ 99 subiu o ticket médio e a conversão. Margem por pedido caiu menos que o ganho de volume.",
+    "url": "https://absmartly.exemplo.com.br/experiments/ab_frete_99",
+    "source_system": "absmartly",
+    "external_id": "ab_frete_99",
+    "strength": "causal",
+    "conformance_level": 2,
+    "tags": ["frete", "precos", "conversao"],
+    "record": {
+      "spec_version": "0.1.0",
+      "conformance_level": 2,
+      "source": {
+        "system": "absmartly",
+        "external_id": "ab_frete_99",
+        "url": "https://absmartly.exemplo.com.br/experiments/ab_frete_99"
+      },
+      "name": "Frete grátis acima de noventa e nove reais",
+      "experiment_type": "ab",
+      "started_on": "2026-06-08",
+      "ended_on": "2026-07-06",
+      "variants": [
+        { "key": "control", "name": "Piso em R$ 149", "is_control": true, "allocation": 0.5 },
+        { "key": "b", "name": "Piso em R$ 99", "is_control": false, "allocation": 0.5 }
+      ],
+      "hypothesis": "Baixar o piso do frete grátis aumenta a conversão sem destruir a margem.",
+      "owner": { "name": "Diego Alencar", "email": "diego@exemplo.com.br" },
+      "outcome": "ship",
+      "tags": ["frete", "precos", "conversao"],
+      "learning": "O piso de frete funciona como âncora de ticket: pedidos se concentram logo acima do piso, e o ganho de volume cobriu a margem cedida.",
+      "primary_metric": { "name": "conversão da sessão", "direction": "increase", "unit": "%" },
+      "effect": {
+        "point": 0.047,
+        "ci_low": 0.021,
+        "ci_high": 0.073,
+        "ci_level": 0.95,
+        "relative": true,
+        "method": "sequential",
+        "comparable_across_sources": false
+      }
+    }
+  },
+  {
+    "id": "ev-margem-por-faixa",
+    "kind": "analysis",
+    "title": "Margem de contribuição por faixa de valor do pedido",
+    "summary": "Pedidos entre R$ 99 e R$ 149 têm a menor margem de contribuição do catálogo depois do custo de frete.",
+    "url": "https://dados.exemplo.com.br/paineis/margem-faixa",
+    "strength": "correlational",
+    "tags": ["precos", "margem", "frete"]
+  },
+  {
+    "id": "ev-push-entrevistas",
+    "kind": "study",
+    "title": "Seis entrevistas sobre notificações push",
+    "summary": "Participantes associam notificação diária a desinstalação. Três já haviam desligado push do aplicativo.",
+    "url": "https://pesquisa.exemplo.com.br/estudos/push-2026",
+    "strength": "anecdotal",
+    "tags": ["notificacoes", "retencao"]
+  },
+  {
+    "id": "ev-busca-sinonimos",
+    "kind": "experiment",
+    "title": "Dicionário de sinônimos na busca interna",
+    "summary": "Tratar sinônimos na busca reduziu buscas sem resultado e subiu a conversão de quem busca.",
+    "url": "https://lab.exemplo.com.br/experimentos/exp-2026-0142",
+    "source_system": "internal.lab",
+    "external_id": "exp-2026-0142",
+    "strength": "causal",
+    "conformance_level": 1,
+    "tags": ["busca", "conversao"],
+    "record": {
+      "spec_version": "0.1.0",
+      "conformance_level": 1,
+      "source": { "system": "internal.lab", "external_id": "exp-2026-0142" },
+      "name": "Dicionário de sinônimos na busca interna",
+      "experiment_type": "ab",
+      "started_on": "2026-01-12",
+      "ended_on": "2026-02-09",
+      "variants": [
+        { "key": "control", "name": "Busca atual", "is_control": true },
+        { "key": "b", "name": "Com sinônimos", "is_control": false }
+      ],
+      "hypothesis": "Tratar sinônimos reduz buscas sem resultado e aumenta a conversão de quem busca.",
+      "owner": { "name": "Bruno Tavares", "email": "bruno@exemplo.com.br" },
+      "outcome": "ship",
+      "tags": ["busca", "conversao"],
+      "learning": "Boa parte da busca sem resultado era vocabulário, não falta de catálogo."
+    }
+  },
+  {
+    "id": "ev-busca-zero-resultados",
+    "kind": "analysis",
+    "title": "Termos de busca sem resultado, trimestre",
+    "summary": "41% das buscas sem resultado usam termo que existe no catálogo sob outro nome.",
+    "url": "https://dados.exemplo.com.br/paineis/busca-zero",
+    "strength": "correlational",
+    "tags": ["busca"]
+  },
+  {
+    "id": "ev-politica-devolucao",
+    "kind": "document",
+    "title": "Política de devolução vigente",
+    "summary": "Prazo de 30 dias para devolução, acima dos 7 dias exigidos por lei. Documento jurídico, sem medição associada.",
+    "url": "https://intranet.exemplo.com.br/politicas/devolucao",
+    "strength": "anecdotal",
+    "tags": ["devolucao", "juridico"]
+  }
+]

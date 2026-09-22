@@ -1,0 +1,42 @@
+[
+  {
+    "id": "rv-onboarding",
+    "decision_id": "dec-onboarding-tres-etapas",
+    "due_on": "2026-09-15",
+    "done_on": null,
+    "verdict": null,
+    "notes": null
+  },
+  {
+    "id": "rv-checkout",
+    "decision_id": "dec-remover-confirmacao",
+    "due_on": "2026-09-18",
+    "done_on": null,
+    "verdict": null,
+    "notes": null
+  },
+  {
+    "id": "rv-frete",
+    "decision_id": "dec-frete-gratis-99",
+    "due_on": "2026-12-10",
+    "done_on": null,
+    "verdict": null,
+    "notes": null
+  },
+  {
+    "id": "rv-busca",
+    "decision_id": "dec-busca-sinonimos",
+    "due_on": "2026-06-30",
+    "done_on": "2026-07-02",
+    "verdict": "better",
+    "notes": "Buscas sem resultado caíram 38%, acima do esperado."
+  },
+  {
+    "id": "rv-devolucao",
+    "decision_id": "dec-manter-devolucao-30-dias",
+    "due_on": "2027-01-15",
+    "done_on": null,
+    "verdict": null,
+    "notes": null
+  }
+]

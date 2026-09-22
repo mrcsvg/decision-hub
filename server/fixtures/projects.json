@@ -1,0 +1,6 @@
+[
+  { "id": "proj-checkout", "name": "Checkout 2026" },
+  { "id": "proj-ativacao", "name": "Ativação e onboarding" },
+  { "id": "proj-precos",   "name": "Preços e frete" },
+  { "id": "proj-busca",    "name": "Busca interna" }
+]
