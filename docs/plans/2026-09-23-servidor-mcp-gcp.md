@@ -2584,6 +2584,7 @@ git commit -m "feat(server): ferramentas de leitura sobre o Postgres"
 - Criar: `server/decision_memory/writes.py`
 - Modificar: `server/decision_memory/server.py` (no ponto "As escritas entram aqui")
 - Criar: `server/tests_real/test_app_writes.py`
+- Modificar: `server/decision_memory/models.py` — campo `reused` em `ProposeData`
 - Modificar: `server/tests_real/test_app_surface.py` — tirar o `xfail` de
   `test_sao_exatamente_seis_ferramentas` (é `strict`: com as seis, passa e o xfail vira falha)
 
@@ -2670,16 +2671,31 @@ def test_proposta_completa_grava_alternativas_tags_e_evidencia(server, admin_con
     assert role == "supports"
 
 
-def test_sem_identidade_nao_escreve(server):
+def test_sem_identidade_nao_escreve(server, admin_conn):
+    title = "Decisão zeppelin sem identidade"
     with pytest.raises(Exception) as excinfo:
-        call(server, "propose_decision", PROPOSTA, as_email=None)
+        call(server, "propose_decision", {**PROPOSTA, "title": title}, as_email=None)
     assert "nada foi gravado" in str(excinfo.value)
+    assert count(admin_conn, "SELECT count(*) FROM decision WHERE title = %s", title) == 0
 
 
-def test_conta_nao_cadastrada_nao_escreve(server):
+def test_conta_nao_cadastrada_nao_escreve(server, admin_conn):
+    title = "Decisão zeppelin de conta estranha"
     with pytest.raises(Exception) as excinfo:
-        call(server, "propose_decision", PROPOSTA, as_email="estranha@exemplo.com")
+        call(server, "propose_decision", {**PROPOSTA, "title": title},
+             as_email="estranha@exemplo.com")
     assert "não está cadastrada" in str(excinfo.value)
+    assert count(admin_conn, "SELECT count(*) FROM decision WHERE title = %s", title) == 0
+
+
+def test_email_da_conta_casa_sem_caixa(server):
+    """A identidade chega em minúsculas pela middleware, mas o banco pode não estar."""
+    did = proposta(server, "Decisão zeppelin em caixa alta")
+    with acting_as(ANA.upper()):
+        res = run(server.call_tool("record_learning", {
+            "summary": "Caixa do e-mail não muda quem é a pessoa zeppelin",
+            "decision_ids": [did]}))
+    assert res.structured_content["data"]["state"] == "proposed"
 
 
 def test_decisor_desconhecido_nao_cria_registro(server, admin_conn):
@@ -2817,6 +2833,10 @@ def test_vinculo_repetido_nao_muda_nada(server, admin_conn):
     data = call(server, "attach_evidence", {
         "decision_id": did, "role": "discarded", "evidence_id": eid, "weight": 0.1,
     }).structured_content["data"]
+    res = call(server, "attach_evidence", {
+        "decision_id": did, "role": "supports", "evidence_id": eid,
+    }).structured_content
+    assert res["pending"]["on_this_record"] == [], "vínculo repetido não cobra nada"
     assert data["already_linked"] is True
     assert data["role"] == "supports", "o papel original não pode ser trocado por agente"
     role, weight = admin_conn.execute(
@@ -2825,16 +2845,18 @@ def test_vinculo_repetido_nao_muda_nada(server, admin_conn):
     assert (role, float(weight)) == ("supports", 0.9)
 
 
-def test_experimento_de_plataforma_novo_nao_entra_por_agente(server, admin_conn):
+@pytest.mark.parametrize("kind", ["experiment", "analysis"])
+def test_identidade_de_origem_nova_nao_entra_por_agente(server, admin_conn, kind):
+    """Qualquer tipo: (source_system, external_id) inédito só entra pela ingestão."""
     did = str(fid("dec-remover-confirmacao"))
     with pytest.raises(Exception) as excinfo:
         call(server, "attach_evidence", {
             "decision_id": did, "role": "supports",
-            "evidence": {"kind": "experiment", "title": "x", "strength": "causal",
-                         "source_system": "growthbook", "external_id": "exp_inedito"}})
+            "evidence": {"kind": kind, "title": "x zeppelin", "strength": "causal",
+                         "source_system": "growthbook", "external_id": f"inedito_{kind}"}})
     assert "ingestão" in str(excinfo.value)
     assert count(admin_conn, "SELECT count(*) FROM evidence "
-                             "WHERE external_id = 'exp_inedito'") == 0
+                             "WHERE external_id = %s OR title = 'x zeppelin'", f"inedito_{kind}") == 0
 
 
 def test_licao_precisa_de_origem(server):
@@ -2871,6 +2893,156 @@ def test_licao_curta_pede_condicao(server):
                                            "decision_ids": [did]}).structured_content
     assert res["pending"]["on_this_record"] == [
         "Lição muito curta para viajar entre projetos: em que condição ela vale?"]
+
+
+# ---------------------------------------------------------------- validação
+
+
+def erro(server, name, args) -> str:
+    """Mensagem do erro; nunca pode ser o erro interno genérico."""
+    with pytest.raises(Exception) as excinfo:
+        call(server, name, args)
+    message = str(excinfo.value)
+    assert "Erro interno" not in message, message
+    return message
+
+
+@pytest.fixture(scope="module")
+def decisao(server):
+    return proposta(server, "Decisão zeppelin para validar tipos")
+
+
+@pytest.mark.parametrize("weight", ["0.5", True, 1.5, -0.1])
+def test_weight_invalido_e_recusado(server, decisao, weight):
+    message = erro(server, "attach_evidence", {
+        "decision_id": decisao, "role": "supports",
+        "evidence_id": str(fid("ev-checkout-confirm")), "weight": weight})
+    assert "weight" in message
+
+
+@pytest.mark.parametrize("weight", [0, 1])
+def test_weight_nos_limites_e_aceito(server, weight):
+    did = proposta(server, f"Decisão zeppelin com peso {weight}")
+    data = call(server, "attach_evidence", {
+        "decision_id": did, "role": "supports",
+        "evidence_id": str(fid("ev-checkout-confirm")), "weight": weight,
+    }).structured_content["data"]
+    assert data["already_linked"] is False
+
+
+@pytest.mark.parametrize(("evidence", "trecho"), [
+    ({"kind": "rumor", "title": "t", "strength": "causal"}, "kind"),
+    ({"kind": "analysis", "title": "t", "strength": "forte"}, "strength"),
+    ({"kind": "analysis", "title": 3, "strength": "causal"}, "title"),
+    ({"kind": "analysis", "title": "  ", "strength": "causal"}, "title"),
+    ({"kind": "analysis", "title": "t", "strength": "causal", "url": ["x"]}, "url"),
+    ({"kind": "analysis", "title": "t", "strength": "causal", "summary": 1}, "summary"),
+    ({"kind": "analysis", "title": "t", "strength": "causal", "source_system": "x"},
+     "external_id"),
+    ({"kind": "analysis", "title": "t", "strength": "causal", "source_system": 1,
+      "external_id": "x"}, "source_system"),
+])
+def test_evidencia_nova_malformada_e_recusada(server, decisao, evidence, trecho):
+    message = erro(server, "attach_evidence", {
+        "decision_id": decisao, "role": "supports", "evidence": evidence})
+    assert trecho in message
+
+
+def test_note_precisa_ser_texto(server, decisao):
+    message = erro(server, "attach_evidence", {
+        "decision_id": decisao, "role": "supports",
+        "evidence_id": str(fid("ev-checkout-confirm")), "note": 7})
+    assert "note" in message
+
+
+def test_evidence_id_e_evidence_juntos_sao_recusados(server, decisao):
+    message = erro(server, "attach_evidence", {
+        "decision_id": decisao, "role": "supports",
+        "evidence_id": str(fid("ev-checkout-confirm")),
+        "evidence": {"kind": "analysis", "title": "t", "strength": "causal"}})
+    assert "um dos dois" in message
+
+
+def test_chaves_inesperadas_na_evidencia_sao_ignoradas(server, admin_conn, decisao):
+    data = call(server, "attach_evidence", {
+        "decision_id": decisao, "role": "contradicts",
+        "evidence": {"kind": "experiment", "title": "Planilha zeppelin", "strength": "anecdotal",
+                     "conformance_level": 2, "normalized": {"x": 1}, "imported_at": "2026-01-01"},
+    }).structured_content["data"]
+    row = admin_conn.execute(
+        "SELECT conformance_level, normalized, imported_at, source_system FROM evidence "
+        "WHERE id = %s", (data["evidence_id"],)).fetchone()
+    assert tuple(row) == (None, None, None, None)
+
+
+@pytest.mark.parametrize(("args", "trecho"), [
+    ({"title": "   "}, "title"),
+    ({"description": ""}, "description"),
+    ({"alternatives": [{"description": "a", "rejection_reason": " "}]}, "rejection_reason"),
+    ({"alternatives": [{"description": "a"}]}, "rejection_reason"),
+    ({"evidence": [{"evidence_id": 3, "role": "supports"}]}, "evidence_id"),
+    ({"evidence": [{"evidence_id": str(fid("ev-checkout-confirm")), "role": "apoia"}]}, "role"),
+    ({"evidence": [{"evidence_id": str(fid("ev-checkout-confirm")), "role": "supports",
+                    "weight": "alto"}]}, "weight"),
+    ({"evidence": ["ev-checkout-confirm"]}, "evidence"),
+    ({"tags": ["ok", 1]}, "tags"),
+])
+def test_proposta_malformada_e_recusada_sem_gravar(server, admin_conn, args, trecho):
+    title = args.get("title", "Decisão zeppelin malformada")
+    message = erro(server, "propose_decision", {**PROPOSTA, "title": title, **args})
+    assert trecho in message
+    assert count(admin_conn, "SELECT count(*) FROM decision "
+                             "WHERE title = 'Decisão zeppelin malformada'") == 0
+
+
+@pytest.mark.parametrize(("args", "trecho"), [
+    ({"summary": "  "}, "summary"),
+    ({"decision_ids": [1]}, "decision_ids"),
+    ({"evidence_ids": "abc"}, "evidence_ids"),
+])
+def test_licao_malformada_e_recusada(server, decisao, args, trecho):
+    message = erro(server, "record_learning",
+                   {"summary": "Uma lição zeppelin", "decision_ids": [decisao], **args})
+    assert trecho in message
+
+
+# ---------------------------------------------------- cobrança e reaproveitamento
+
+
+def test_favoravel_nao_cobra_contraria_quando_ela_ja_existe(server):
+    did = proposta(server, "Decisão zeppelin já contestada", evidence=[
+        {"evidence_id": str(fid("ev-checkout-pagina-unica")), "role": "contradicts"}])
+    res = call(server, "attach_evidence", {
+        "decision_id": did, "role": "supports",
+        "evidence_id": str(fid("ev-checkout-confirm"))}).structured_content
+    assert res["pending"]["on_this_record"] == []
+
+
+def test_idempotencia_devolve_o_registro_gravado_nao_o_novo(server, admin_conn):
+    args = {**PROPOSTA, "title": "Decisão zeppelin gravada primeiro",
+            "context": "Havia atraso.", "idempotency_key": "k-gravado",
+            "alternatives": [{"description": "a", "rejection_reason": "b"}]}
+    a = call(server, "propose_decision", args).structured_content
+    assert a["data"]["reused"] is False
+    assert a["data"]["missing"] == ["evidence"]
+    b = call(server, "propose_decision", {
+        **PROPOSTA, "title": "Decisão zeppelin reenviada", "idempotency_key": "k-gravado"})
+    data = b.structured_content["data"]
+    assert data["reused"] is True
+    assert data["decision_id"] == a["data"]["decision_id"]
+    assert data["slug"] == a["data"]["slug"]
+    assert data["state"] == "proposed"
+    assert data["missing"] == ["evidence"], "o que falta é do registro gravado"
+    assert b.structured_content["pending"]["on_this_record"] == [writes.PROMPTS["evidence"]]
+    assert "não foi aplicado" in b.content[0].text
+    assert count(admin_conn, "SELECT count(*) FROM decision "
+                             "WHERE title = 'Decisão zeppelin reenviada'") == 0
+
+
+def test_slug_nao_termina_em_hifen():
+    """Corte em 80 caracteres logo antes de um espaço deixaria o hífen no fim."""
+    title = "a" * 79 + " zeppelin"
+    assert writes.slug_base(title) == "a" * 79
 ```
 
 **Passo 2: rodar e ver falhar.** Esperado: `Unknown tool: propose_decision` ou equivalente.
@@ -2916,12 +3088,21 @@ DECIDER_NOT_FOUND = (
     "Pessoa não encontrada. Confirme o e-mail com o usuário; o registro não foi criado."
 )
 
+ORIGIN_FROM_INGESTION = (
+    "Identidade de origem (source_system + external_id) só entra pela ingestão do contrato "
+    "(spec/), não por agente; nada foi gravado. Registre a evidência sem source_system e "
+    "external_id, com a url, ou peça a importação a quem administra."
+)
+
 # Mesmas frases do stub: falam só do registro recém-criado.
 PROMPTS = {
     "alternatives": "Sem alternativas descartadas: quais opções foram consideradas e por que perderam?",
     "evidence": "Sem evidência vinculada: o que sustentou ou contradisse essa escolha?",
     "context": "Sem contexto: qual era o problema no momento da decisão?",
 }
+ONLY_SUPPORTS = (
+    "Só há evidência favorável registrada até agora: houve algo que contradisse a escolha?"
+)
 
 
 def _uuid(value: Any, what: str) -> uuid.UUID:
@@ -2931,8 +3112,59 @@ def _uuid(value: Any, what: str) -> uuid.UUID:
         raise ToolError(f"{what} inválido: {value}. Use search_evidence para obter o id.") from None
 
 
+# Validação de tipo. O schema de entrada já barra boa parte, mas não o que vem
+# dentro de objetos livres (evidence, itens de evidence); e um tipo errado que
+# chegasse ao SQL viraria o erro interno genérico, que não diz o que corrigir.
+
+
+def _opt_text(value: Any, what: str) -> str | None:
+    """Texto opcional; vazio (depois do strip) vale como ausente."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ToolError(f"{what} deve ser texto.")
+    return value if value.strip() else None
+
+
+def _req_text(value: Any, what: str) -> str:
+    text = _opt_text(value, what)
+    if text is None:
+        raise ToolError(f"{what} é obrigatório e não pode ficar em branco.")
+    return text
+
+
+def _text_list(value: Any, what: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ToolError(f"{what} deve ser uma lista de textos.")
+    return value
+
+
+def _weight(value: Any) -> float | None:
+    if value is None:
+        return None
+    # bool é int em Python; aqui não é peso.
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ToolError("weight deve ser um número de 0 a 1.")
+    if not 0 <= value <= 1:
+        raise ToolError("weight vai de 0 a 1.")
+    return float(value)
+
+
+def _role(value: Any) -> str:
+    if value not in ROLES:
+        raise ToolError("role deve ser supports, contradicts ou discarded.")
+    return value
+
+
 def _lock(conn, *parts: object) -> None:
-    """Trava de transação sobre uma chave textual; solta sozinha no commit ou rollback."""
+    """Trava de transação sobre uma chave textual; solta sozinha no commit ou rollback.
+
+    A espera pela trava conta no statement_timeout (5 s, db.py): se a outra
+    transação demorar mais que isso, esta sai com o erro interno genérico, sem
+    gravar nada. Aceitável na v0, em que cada escrita leva milissegundos.
+    """
     conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                  (":".join(str(p) for p in parts),))
 
@@ -2944,7 +3176,8 @@ def require_principal(conn) -> uuid.UUID:
             "Não consegui identificar sua conta nesta chamada; nada foi gravado. "
             "Conecte pelo gcloud run services proxy (ver README do servidor)."
         )
-    row = conn.execute("SELECT id FROM person WHERE lower(email) = %s", (email,)).fetchone()
+    row = conn.execute("SELECT id FROM person WHERE lower(email) = lower(%s)",
+                       (email,)).fetchone()
     if row is None:
         raise ToolError(
             f"Sua conta {email} não está cadastrada no registro. Peça a quem administra "
@@ -2978,8 +3211,14 @@ def _tags(conn, link_table: str, fk: str, object_id: uuid.UUID, tags: list[str] 
             "ON CONFLICT DO NOTHING", (object_id, name))
 
 
+def slug_base(title: str) -> str:
+    """Título dobrado, só letras e dígitos separados por hífen, até 80 caracteres."""
+    words = "".join(c if c.isalnum() else " " for c in fold(title)).split()
+    return "-".join(words)[:80].rstrip("-") or "decisao"
+
+
 def _slug(conn, title: str) -> str:
-    base = "-".join("".join(c if c.isalnum() else " " for c in fold(title)).split())[:80] or "decisao"
+    base = slug_base(title)
     # Dois títulos iguais ao mesmo tempo escolheriam o mesmo sufixo.
     _lock(conn, "slug", base)
     taken = {r["slug"] for r in conn.execute(
@@ -3014,33 +3253,83 @@ def _date(value: str | None) -> date:
         raise ToolError(f"decided_on inválida: {value}. Use o formato AAAA-MM-DD.") from None
 
 
+def _stored_decision(conn, principal: uuid.UUID, key: str) -> dict[str, Any] | None:
+    """O registro já gravado com essa chave, com o que falta calculado dele mesmo."""
+    row = conn.execute(
+        "SELECT d.id::text AS id, d.slug, d.state::text AS state, "
+        "coalesce(btrim(d.context), '') = '' AS no_context, "
+        "NOT EXISTS (SELECT 1 FROM alternative a WHERE a.decision_id = d.id) AS no_alternatives, "
+        "NOT EXISTS (SELECT 1 FROM decision_evidence x WHERE x.decision_id = d.id) AS no_evidence "
+        "FROM idempotency_key k JOIN decision d ON d.id = k.object_id "
+        "WHERE k.principal_person_id = %s AND k.key = %s", (principal, key)).fetchone()
+    if row is None:
+        return None
+    missing = [f for f, absent in (("alternatives", row["no_alternatives"]),
+                                   ("evidence", row["no_evidence"]),
+                                   ("context", row["no_context"])) if absent]
+    return {"decision_id": row["id"], "slug": row["slug"], "state": row["state"],
+            "missing": missing, "reused": True}
+
+
+def _alternatives(value: Any) -> list[tuple[str, str]]:
+    bad = ToolError("Cada alternativa precisa de description e rejection_reason, ambos texto "
+                    "não vazio.")
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise bad
+    out = []
+    for alt in value:
+        if not isinstance(alt, dict):
+            raise bad
+        try:
+            out.append((_req_text(alt.get("description"), "description"),
+                        _req_text(alt.get("rejection_reason"), "rejection_reason")))
+        except ToolError:
+            raise bad from None
+    return out
+
+
+def _evidence_links(value: Any) -> list[tuple[uuid.UUID, str, float | None, str | None]]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, dict) for v in value):
+        raise ToolError("evidence deve ser uma lista de objetos {evidence_id, role}.")
+    return [(_uuid(_req_text(link.get("evidence_id"), "evidence_id"), "evidence_id"),
+             _role(link.get("role")), _weight(link.get("weight")),
+             _opt_text(link.get("note"), "note")) for link in value]
+
+
 def propose_decision(conn, *, title: str, description: str, decider_email: str,
                      context: str | None, decided_on: str | None, door: str,
                      project: str | None, alternatives: list[dict[str, str]] | None,
                      tags: list[str] | None, evidence: list[dict[str, Any]] | None,
                      idempotency_key: str | None) -> tuple[dict[str, Any], list[str]]:
     principal = require_principal(conn)
-    missing = [f for f, v in (("alternatives", alternatives), ("evidence", evidence),
-                              ("context", context)) if not v]
-    prompts = [PROMPTS[f] for f in missing]
+    title = _req_text(title, "title")
+    description = _req_text(description, "description")
+    context = _opt_text(context, "context")
+    alts = _alternatives(alternatives)
+    links = _evidence_links(evidence)
+    tags = _text_list(tags, "tags")
+    idempotency_key = _opt_text(idempotency_key, "idempotency_key")
 
     if idempotency_key:
         # Serializa chamadas com a mesma (pessoa, chave): a segunda espera a
-        # primeira terminar e então encontra a chave já gravada.
+        # primeira terminar e então encontra a chave já gravada. O que volta é
+        # o registro gravado; o conteúdo desta chamada não é aplicado.
         _lock(conn, "idempotency", principal, idempotency_key)
-        row = conn.execute(
-            "SELECT d.id::text AS id, d.slug FROM idempotency_key k JOIN decision d "
-            "ON d.id = k.object_id WHERE k.principal_person_id = %s AND k.key = %s",
-            (principal, idempotency_key)).fetchone()
-        if row:
-            return {"decision_id": row["id"], "slug": row["slug"], "missing": missing}, prompts
+        stored = _stored_decision(conn, principal, idempotency_key)
+        if stored:
+            return stored, [PROMPTS[f] for f in stored["missing"]]
 
     if door not in ("one_way", "two_way"):
         raise ToolError("door deve ser one_way ou two_way.")
     decider = conn.execute("SELECT id FROM person WHERE lower(email) = lower(%s)",
-                           (decider_email.strip(),)).fetchone()
+                           (_opt_text(decider_email, "decider_email") or "",)).fetchone()
     if decider is None:
         raise ToolError(DECIDER_NOT_FOUND)
+    project = _opt_text(project, "project")
     project_id = None
     if project:
         try:
@@ -3053,10 +3342,7 @@ def propose_decision(conn, *, title: str, description: str, decider_email: str,
             raise ToolError(f"Projeto não encontrado: {project}. Confirme o nome com o usuário; "
                             "o registro não foi criado.")
         project_id = row["id"]
-    for alt in alternatives or []:
-        if not alt.get("description") or not alt.get("rejection_reason"):
-            raise ToolError("Cada alternativa precisa de description e rejection_reason.")
-    decided = _date(decided_on)
+    decided = _date(_opt_text(decided_on, "decided_on"))
 
     slug = _slug(conn, title)
     decision_id = conn.execute(
@@ -3064,28 +3350,26 @@ def propose_decision(conn, *, title: str, description: str, decider_email: str,
         "decider_person_id, project_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
         (slug, title, context, description, door, decided, decider["id"], project_id),
     ).fetchone()["id"]
-    for alt in alternatives or []:
+    for alt_description, rejection_reason in alts:
         conn.execute("INSERT INTO alternative (decision_id, description, rejection_reason) "
-                     "VALUES (%s, %s, %s)", (decision_id, alt["description"], alt["rejection_reason"]))
+                     "VALUES (%s, %s, %s)", (decision_id, alt_description, rejection_reason))
     _tags(conn, "decision_tag", "decision_id", decision_id, tags)
-    for link in evidence or []:
-        _link(conn, decision_id, _uuid(link.get("evidence_id"), "evidence_id"),
-              link.get("role"), link.get("weight"), link.get("note"))
+    for evidence_id, role, weight, note in links:
+        _link(conn, decision_id, evidence_id, role, weight, note)
     _provenance(conn, "decision", decision_id, principal)
     if idempotency_key:
         conn.execute("INSERT INTO idempotency_key (principal_person_id, key, object_type, "
                      "object_id) VALUES (%s, %s, 'decision', %s)",
                      (principal, idempotency_key, decision_id))
-    return {"decision_id": str(decision_id), "slug": slug, "missing": missing}, prompts
+    missing = [f for f, v in (("alternatives", alts), ("evidence", links),
+                              ("context", context)) if not v]
+    return ({"decision_id": str(decision_id), "slug": slug, "state": "proposed",
+             "missing": missing, "reused": False}, [PROMPTS[f] for f in missing])
 
 
-def _link(conn, decision_id: uuid.UUID, evidence_id: uuid.UUID, role: str | None,
+def _link(conn, decision_id: uuid.UUID, evidence_id: uuid.UUID, role: str,
           weight: float | None, note: str | None) -> tuple[str, bool]:
     """Vincula; se já havia vínculo, devolve o papel original sem mudar nada."""
-    if role not in ROLES:
-        raise ToolError("role deve ser supports, contradicts ou discarded.")
-    if weight is not None and not 0 <= weight <= 1:
-        raise ToolError("weight vai de 0 a 1.")
     _evidence_exists(conn, evidence_id)
     inserted = conn.execute(
         "INSERT INTO decision_evidence (decision_id, evidence_id, role, weight, note) "
@@ -3099,67 +3383,91 @@ def _link(conn, decision_id: uuid.UUID, evidence_id: uuid.UUID, role: str | None
     return existing["role"], True
 
 
+def _new_evidence(conn, evidence: Any, principal: uuid.UUID) -> tuple[uuid.UUID, bool]:
+    """Resolve o objeto evidence: reaproveita pela origem ou cria sem origem.
+
+    Agente nunca cria evidência com (source_system, external_id): essa
+    identidade vem só da ingestão pelo contrato. Chaves que o agente mandar
+    além das previstas (conformance_level, normalized, ...) são ignoradas.
+    """
+    if not isinstance(evidence, dict):
+        raise ToolError("evidence deve ser um objeto {kind, title, strength, ...}.")
+    title = _opt_text(evidence.get("title"), "title")
+    summary = _opt_text(evidence.get("summary"), "summary")
+    url = _opt_text(evidence.get("url"), "url")
+    system = _opt_text(evidence.get("source_system"), "source_system")
+    external = _opt_text(evidence.get("external_id"), "external_id")
+    if (system is None) != (external is None):
+        raise ToolError("source_system e external_id vão juntos: informe os dois ou nenhum.")
+    if system is not None:
+        row = conn.execute("SELECT id FROM evidence WHERE source_system = %s AND external_id = %s",
+                           (system, external)).fetchone()
+        if row is None:
+            raise ToolError(ORIGIN_FROM_INGESTION)
+        return row["id"], True
+
+    kind, strength = evidence.get("kind"), evidence.get("strength")
+    if kind not in EVIDENCE_KINDS:
+        raise ToolError(f"kind deve ser um de: {', '.join(EVIDENCE_KINDS)}.")
+    if strength not in STRENGTHS:
+        raise ToolError(f"strength deve ser um de: {', '.join(STRENGTHS)}.")
+    if title is None:
+        raise ToolError("A evidência nova precisa de title, texto não vazio.")
+    eid = conn.execute(
+        "INSERT INTO evidence (kind, title, summary, url, strength) "
+        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+        (kind, title, summary, url, strength)).fetchone()["id"]
+    _provenance(conn, "evidence", eid, principal)
+    return eid, False
+
+
 def attach_evidence(conn, *, decision_id: str, role: str, evidence_id: str | None,
                     evidence: dict[str, Any] | None, weight: float | None,
-                    note: str | None) -> dict[str, Any]:
+                    note: str | None) -> tuple[dict[str, Any], list[str]]:
     principal = require_principal(conn)
     did = _uuid(decision_id, "decision_id")
     _decision_exists(conn, did)
+    if evidence_id and evidence:
+        raise ToolError("Informe um dos dois, não ambos: evidence_id de uma evidência existente "
+                        "ou o objeto evidence.")
     if not evidence_id and not evidence:
         raise ToolError("Informe evidence_id de uma evidência existente ou o objeto evidence.")
+    role = _role(role)
+    weight = _weight(weight)
+    note = _opt_text(note, "note")
 
-    reused = False
     if evidence_id:
-        eid = _uuid(evidence_id, "evidence_id")
-        reused = True
+        eid, reused = _uuid(_req_text(evidence_id, "evidence_id"), "evidence_id"), True
     else:
-        system, external = evidence.get("source_system"), evidence.get("external_id")
-        if bool(system) != bool(external):
-            raise ToolError("source_system e external_id vão juntos: informe os dois ou nenhum.")
-        if system:
-            # Duas chamadas com a mesma origem inédita não podem ambas inserir.
-            _lock(conn, "evidence", system, external)
-        row = conn.execute("SELECT id FROM evidence WHERE source_system = %s AND external_id = %s",
-                           (system, external)).fetchone() if system else None
-        if row:
-            eid, reused = row["id"], True
-        else:
-            kind, strength = evidence.get("kind"), evidence.get("strength")
-            if kind not in EVIDENCE_KINDS:
-                raise ToolError(f"kind deve ser um de: {', '.join(EVIDENCE_KINDS)}.")
-            if strength not in STRENGTHS:
-                raise ToolError(f"strength deve ser um de: {', '.join(STRENGTHS)}.")
-            if not evidence.get("title"):
-                raise ToolError("A evidência nova precisa de title.")
-            if kind == "experiment" and system:
-                raise ToolError(
-                    "Experimento de plataforma entra pela ingestão do contrato (spec/), não por "
-                    "agente. Registre sem source_system/external_id, com a url, ou peça a "
-                    "importação a quem administra.")
-            eid = conn.execute(
-                "INSERT INTO evidence (kind, title, summary, url, source_system, external_id, "
-                "strength) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
-                (kind, evidence["title"], evidence.get("summary"), evidence.get("url"),
-                 system or None, external or None, strength)).fetchone()["id"]
-            _provenance(conn, "evidence", eid, principal)
+        eid, reused = _new_evidence(conn, evidence, principal)
 
     final_role, already = _link(conn, did, eid, role, weight, note)
-    state = conn.execute(
+    row = conn.execute(
         "SELECT CASE WHEN EXISTS (SELECT 1 FROM provenance WHERE object_type = 'evidence' "
         "AND object_id = %s AND attested_at IS NOT NULL) THEN 'attested' ELSE 'proposed' END "
-        "AS s", (eid,)).fetchone()["s"]
-    return {"decision_id": str(did), "evidence_id": str(eid), "role": final_role,
-            "reused_existing": reused, "already_linked": already, "state": state}
+        "AS state, EXISTS (SELECT 1 FROM decision_evidence WHERE decision_id = %s "
+        "AND role = 'contradicts') AS contested", (eid, did)).fetchone()
+    # Só cobra a evidência contrária quando este vínculo é novo, favorável, e a
+    # decisão ainda não tem nenhuma contrária.
+    nudge = ([ONLY_SUPPORTS] if final_role == "supports" and not already
+             and not row["contested"] else [])
+    return ({"decision_id": str(did), "evidence_id": str(eid), "role": final_role,
+             "reused_existing": reused, "already_linked": already, "state": row["state"]},
+            nudge)
 
 
 def record_learning(conn, *, summary: str, decision_ids: list[str] | None,
                     evidence_ids: list[str] | None, tags: list[str] | None) -> dict[str, Any]:
     principal = require_principal(conn)
+    summary = _req_text(summary, "summary")
+    decision_ids = _text_list(decision_ids, "decision_ids")
+    evidence_ids = _text_list(evidence_ids, "evidence_ids")
+    tags = _text_list(tags, "tags")
     if not decision_ids and not evidence_ids:
         raise ToolError("Uma lição precisa de origem: informe decision_ids ou evidence_ids.")
     # dict.fromkeys: tira repetidos sem mudar a ordem, e o vínculo não bate na PK.
-    dids = list(dict.fromkeys(_uuid(d, "decision_id") for d in decision_ids or []))
-    eids = list(dict.fromkeys(_uuid(e, "evidence_id") for e in evidence_ids or []))
+    dids = list(dict.fromkeys(_uuid(d, "decision_id") for d in decision_ids))
+    eids = list(dict.fromkeys(_uuid(e, "evidence_id") for e in evidence_ids))
     for d in dids:
         _decision_exists(conn, d)
     for e in eids:
@@ -3178,6 +3486,18 @@ def record_learning(conn, *, summary: str, decision_ids: list[str] | None,
             "linked_evidence": [str(e) for e in eids]}
 ```
 
+Em `server/decision_memory/models.py`, `ProposeData` ganha, depois de `missing`:
+
+```python
+    reused: bool = Field(
+        False,
+        description=(
+            "true quando a idempotency_key já tinha registrado esta decisão: volta o registro "
+            "gravado e o conteúdo desta chamada não foi aplicado."
+        ),
+    )
+```
+
 **Passo 4: registrar em `server.py`.** No ponto "As escritas entram aqui" (o
 comentário sai), acrescente `writes` ao import `from . import ...` e a constante
 `WRITE` ao lado de `READ`:
@@ -3185,6 +3505,7 @@ comentário sai), acrescente `writes` ao import `from . import ...` e a constant
 ```python
     # junto de READ, no topo do módulo:
     # WRITE = dict(read_only_hint=False, destructive_hint=False, open_world_hint=False)
+    # e nos imports: from pydantic import Field
 
     @server.tool(name="propose_decision", description=DESCRIPTIONS["propose_decision"],
                  annotations=t.ToolAnnotations(idempotent_hint=True, **WRITE))
@@ -3212,9 +3533,13 @@ comentário sai), acrescente `writes` ao import `from . import ...` e a constant
 
         data, block = with_db(pool, work)
         body = models.ProposeResponse(data=models.ProposeData(**data), pending=block)
-        summary = (f"Decisão registrada como proposta ({data['decision_id']}). Uma pessoa "
-                   "precisa atestá-la e registrar a expectativa; ainda não há superfície "
-                   "de atestação, então ela fica proposta.")
+        if data["reused"]:
+            summary = (f"Essa idempotency_key já tinha registrado a decisão {data['decision_id']} "
+                       f"({data['state']}); o conteúdo desta chamada não foi aplicado.")
+        else:
+            summary = (f"Decisão registrada como proposta ({data['decision_id']}). Uma pessoa "
+                       "precisa atestá-la e registrar a expectativa; ainda não há superfície "
+                       "de atestação, então ela fica proposta.")
         return _result(summary, body, block)
 
     @server.tool(name="attach_evidence", description=DESCRIPTIONS["attach_evidence"],
@@ -3224,18 +3549,17 @@ comentário sai), acrescente `writes` ao import `from . import ...` e a constant
         role: str,
         evidence_id: str | None = None,
         evidence: dict[str, Any] | None = None,
-        weight: float | None = None,
+        # strict: sem ele, "0.5" e true virariam número em silêncio.
+        weight: Annotated[float | None, Field(strict=True)] = None,
         note: str | None = None,
     ) -> Annotated[t.CallToolResult, models.AttachResponse]:
         def work(conn):
-            data = writes.attach_evidence(conn, decision_id=decision_id, role=role,
-                                          evidence_id=evidence_id, evidence=evidence,
-                                          weight=weight, note=note)
+            data, nudge = writes.attach_evidence(conn, decision_id=decision_id, role=role,
+                                                 evidence_id=evidence_id, evidence=evidence,
+                                                 weight=weight, note=note)
             tags = {r["name"] for r in conn.execute(
                 "SELECT t.name FROM decision_tag x JOIN tag t ON t.id = x.tag_id "
                 "WHERE x.decision_id = %s", (data["decision_id"],)).fetchall()}
-            nudge = ["Só há evidência favorável registrada até agora: houve algo que "
-                     "contradisse a escolha?"] if data["role"] == "supports" else []
             return data, pending.build(conn, context_tags=tags, on_this_record=nudge)
 
         data, block = with_db(pool, work)
@@ -3281,6 +3605,7 @@ Esperado: tudo passa, inclusive `test_sao_exatamente_seis_ferramentas` e
 
 ```bash
 git add server/decision_memory/writes.py server/decision_memory/server.py \
+  server/decision_memory/models.py \
   server/tests_real/test_app_writes.py server/tests_real/test_app_surface.py
 git commit -m "feat(server): ferramentas de escrita, tudo nasce proposto"
 ```
@@ -3695,9 +4020,14 @@ curl -s localhost:8080/mcp $H -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
 - **`provenance.model` é sempre `unknown`.** O MCP não informa o modelo e o `clientInfo` não
   chega em modo sem estado. O `User-Agent` do cliente vai para `source_ref`.
 - **Estado da evidência** derivado da procedência ([ADR 0005](../../docs/adr/0005-estado-da-evidencia.md)).
-- **Experimento de plataforma novo não entra por agente.** `attach_evidence` com
-  `kind = experiment` e `source_system` inédito é recusado: esse caminho é o da ingestão pelo
-  contrato. Experimento já importado é reaproveitado normalmente.
+- **`attach_evidence`: evidência criada por agente não recebe `source_system`/`external_id`;
+  identidade de origem vem só da ingestão.** Um par inédito é recusado, de qualquer `kind`;
+  um par que já existe é reaproveitado normalmente.
+- **`attach_evidence` é anotada idempotente no `MCP_TOOLS.md`, mas evidência nova sem
+  identidade de origem é criada de novo a cada chamada.** O vínculo com a decisão não se
+  repete; a evidência, sim.
+- **`propose_decision` devolve também `reused`.** Com `idempotency_key` já usada, volta o
+  registro gravado (estado e `missing` dele), e o conteúdo da chamada nova não é aplicado.
 - **`list_pending_reviews`**: `unattested` não é filtrado por `owner_email`.
 - **Busca**: dicionário `simple`, sem radical — "conversões" não encontra "conversão".
   Acento e caixa são ignorados, como no stub, dobrando o texto na hora da consulta; por isso o
@@ -3746,7 +4076,8 @@ acrescente ao fim:
   achariam nada. Termos em OR, com a regra de relevância do stub portada.
 - **Carga:** `python -m decision_memory.seed`, ids uuid5 das fixtures, em vez de
   `scripts/load_fixtures.py`.
-- **`attach_evidence`:** experimento de plataforma inédito é recusado; entra pela ingestão.
+- **`attach_evidence`:** agente não cria evidência com `source_system`/`external_id`, de
+  qualquer tipo; identidade de origem entra só pela ingestão.
 ```
 
 **Passo 4: verificar e commitar.**

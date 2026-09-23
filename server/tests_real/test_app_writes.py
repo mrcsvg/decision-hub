@@ -78,16 +78,31 @@ def test_proposta_completa_grava_alternativas_tags_e_evidencia(server, admin_con
     assert role == "supports"
 
 
-def test_sem_identidade_nao_escreve(server):
+def test_sem_identidade_nao_escreve(server, admin_conn):
+    title = "Decisão zeppelin sem identidade"
     with pytest.raises(Exception) as excinfo:
-        call(server, "propose_decision", PROPOSTA, as_email=None)
+        call(server, "propose_decision", {**PROPOSTA, "title": title}, as_email=None)
     assert "nada foi gravado" in str(excinfo.value)
+    assert count(admin_conn, "SELECT count(*) FROM decision WHERE title = %s", title) == 0
 
 
-def test_conta_nao_cadastrada_nao_escreve(server):
+def test_conta_nao_cadastrada_nao_escreve(server, admin_conn):
+    title = "Decisão zeppelin de conta estranha"
     with pytest.raises(Exception) as excinfo:
-        call(server, "propose_decision", PROPOSTA, as_email="estranha@exemplo.com")
+        call(server, "propose_decision", {**PROPOSTA, "title": title},
+             as_email="estranha@exemplo.com")
     assert "não está cadastrada" in str(excinfo.value)
+    assert count(admin_conn, "SELECT count(*) FROM decision WHERE title = %s", title) == 0
+
+
+def test_email_da_conta_casa_sem_caixa(server):
+    """A identidade chega em minúsculas pela middleware, mas o banco pode não estar."""
+    did = proposta(server, "Decisão zeppelin em caixa alta")
+    with acting_as(ANA.upper()):
+        res = run(server.call_tool("record_learning", {
+            "summary": "Caixa do e-mail não muda quem é a pessoa zeppelin",
+            "decision_ids": [did]}))
+    assert res.structured_content["data"]["state"] == "proposed"
 
 
 def test_decisor_desconhecido_nao_cria_registro(server, admin_conn):
@@ -225,6 +240,10 @@ def test_vinculo_repetido_nao_muda_nada(server, admin_conn):
     data = call(server, "attach_evidence", {
         "decision_id": did, "role": "discarded", "evidence_id": eid, "weight": 0.1,
     }).structured_content["data"]
+    res = call(server, "attach_evidence", {
+        "decision_id": did, "role": "supports", "evidence_id": eid,
+    }).structured_content
+    assert res["pending"]["on_this_record"] == [], "vínculo repetido não cobra nada"
     assert data["already_linked"] is True
     assert data["role"] == "supports", "o papel original não pode ser trocado por agente"
     role, weight = admin_conn.execute(
@@ -233,16 +252,18 @@ def test_vinculo_repetido_nao_muda_nada(server, admin_conn):
     assert (role, float(weight)) == ("supports", 0.9)
 
 
-def test_experimento_de_plataforma_novo_nao_entra_por_agente(server, admin_conn):
+@pytest.mark.parametrize("kind", ["experiment", "analysis"])
+def test_identidade_de_origem_nova_nao_entra_por_agente(server, admin_conn, kind):
+    """Qualquer tipo: (source_system, external_id) inédito só entra pela ingestão."""
     did = str(fid("dec-remover-confirmacao"))
     with pytest.raises(Exception) as excinfo:
         call(server, "attach_evidence", {
             "decision_id": did, "role": "supports",
-            "evidence": {"kind": "experiment", "title": "x", "strength": "causal",
-                         "source_system": "growthbook", "external_id": "exp_inedito"}})
+            "evidence": {"kind": kind, "title": "x zeppelin", "strength": "causal",
+                         "source_system": "growthbook", "external_id": f"inedito_{kind}"}})
     assert "ingestão" in str(excinfo.value)
     assert count(admin_conn, "SELECT count(*) FROM evidence "
-                             "WHERE external_id = 'exp_inedito'") == 0
+                             "WHERE external_id = %s OR title = 'x zeppelin'", f"inedito_{kind}") == 0
 
 
 def test_licao_precisa_de_origem(server):
@@ -279,3 +300,153 @@ def test_licao_curta_pede_condicao(server):
                                            "decision_ids": [did]}).structured_content
     assert res["pending"]["on_this_record"] == [
         "Lição muito curta para viajar entre projetos: em que condição ela vale?"]
+
+
+# ---------------------------------------------------------------- validação
+
+
+def erro(server, name, args) -> str:
+    """Mensagem do erro; nunca pode ser o erro interno genérico."""
+    with pytest.raises(Exception) as excinfo:
+        call(server, name, args)
+    message = str(excinfo.value)
+    assert "Erro interno" not in message, message
+    return message
+
+
+@pytest.fixture(scope="module")
+def decisao(server):
+    return proposta(server, "Decisão zeppelin para validar tipos")
+
+
+@pytest.mark.parametrize("weight", ["0.5", True, 1.5, -0.1])
+def test_weight_invalido_e_recusado(server, decisao, weight):
+    message = erro(server, "attach_evidence", {
+        "decision_id": decisao, "role": "supports",
+        "evidence_id": str(fid("ev-checkout-confirm")), "weight": weight})
+    assert "weight" in message
+
+
+@pytest.mark.parametrize("weight", [0, 1])
+def test_weight_nos_limites_e_aceito(server, weight):
+    did = proposta(server, f"Decisão zeppelin com peso {weight}")
+    data = call(server, "attach_evidence", {
+        "decision_id": did, "role": "supports",
+        "evidence_id": str(fid("ev-checkout-confirm")), "weight": weight,
+    }).structured_content["data"]
+    assert data["already_linked"] is False
+
+
+@pytest.mark.parametrize(("evidence", "trecho"), [
+    ({"kind": "rumor", "title": "t", "strength": "causal"}, "kind"),
+    ({"kind": "analysis", "title": "t", "strength": "forte"}, "strength"),
+    ({"kind": "analysis", "title": 3, "strength": "causal"}, "title"),
+    ({"kind": "analysis", "title": "  ", "strength": "causal"}, "title"),
+    ({"kind": "analysis", "title": "t", "strength": "causal", "url": ["x"]}, "url"),
+    ({"kind": "analysis", "title": "t", "strength": "causal", "summary": 1}, "summary"),
+    ({"kind": "analysis", "title": "t", "strength": "causal", "source_system": "x"},
+     "external_id"),
+    ({"kind": "analysis", "title": "t", "strength": "causal", "source_system": 1,
+      "external_id": "x"}, "source_system"),
+])
+def test_evidencia_nova_malformada_e_recusada(server, decisao, evidence, trecho):
+    message = erro(server, "attach_evidence", {
+        "decision_id": decisao, "role": "supports", "evidence": evidence})
+    assert trecho in message
+
+
+def test_note_precisa_ser_texto(server, decisao):
+    message = erro(server, "attach_evidence", {
+        "decision_id": decisao, "role": "supports",
+        "evidence_id": str(fid("ev-checkout-confirm")), "note": 7})
+    assert "note" in message
+
+
+def test_evidence_id_e_evidence_juntos_sao_recusados(server, decisao):
+    message = erro(server, "attach_evidence", {
+        "decision_id": decisao, "role": "supports",
+        "evidence_id": str(fid("ev-checkout-confirm")),
+        "evidence": {"kind": "analysis", "title": "t", "strength": "causal"}})
+    assert "um dos dois" in message
+
+
+def test_chaves_inesperadas_na_evidencia_sao_ignoradas(server, admin_conn, decisao):
+    data = call(server, "attach_evidence", {
+        "decision_id": decisao, "role": "contradicts",
+        "evidence": {"kind": "experiment", "title": "Planilha zeppelin", "strength": "anecdotal",
+                     "conformance_level": 2, "normalized": {"x": 1}, "imported_at": "2026-01-01"},
+    }).structured_content["data"]
+    row = admin_conn.execute(
+        "SELECT conformance_level, normalized, imported_at, source_system FROM evidence "
+        "WHERE id = %s", (data["evidence_id"],)).fetchone()
+    assert tuple(row) == (None, None, None, None)
+
+
+@pytest.mark.parametrize(("args", "trecho"), [
+    ({"title": "   "}, "title"),
+    ({"description": ""}, "description"),
+    ({"alternatives": [{"description": "a", "rejection_reason": " "}]}, "rejection_reason"),
+    ({"alternatives": [{"description": "a"}]}, "rejection_reason"),
+    ({"evidence": [{"evidence_id": 3, "role": "supports"}]}, "evidence_id"),
+    ({"evidence": [{"evidence_id": str(fid("ev-checkout-confirm")), "role": "apoia"}]}, "role"),
+    ({"evidence": [{"evidence_id": str(fid("ev-checkout-confirm")), "role": "supports",
+                    "weight": "alto"}]}, "weight"),
+    ({"evidence": ["ev-checkout-confirm"]}, "evidence"),
+    ({"tags": ["ok", 1]}, "tags"),
+])
+def test_proposta_malformada_e_recusada_sem_gravar(server, admin_conn, args, trecho):
+    title = args.get("title", "Decisão zeppelin malformada")
+    message = erro(server, "propose_decision", {**PROPOSTA, "title": title, **args})
+    assert trecho in message
+    assert count(admin_conn, "SELECT count(*) FROM decision "
+                             "WHERE title = 'Decisão zeppelin malformada'") == 0
+
+
+@pytest.mark.parametrize(("args", "trecho"), [
+    ({"summary": "  "}, "summary"),
+    ({"decision_ids": [1]}, "decision_ids"),
+    ({"evidence_ids": "abc"}, "evidence_ids"),
+])
+def test_licao_malformada_e_recusada(server, decisao, args, trecho):
+    message = erro(server, "record_learning",
+                   {"summary": "Uma lição zeppelin", "decision_ids": [decisao], **args})
+    assert trecho in message
+
+
+# ---------------------------------------------------- cobrança e reaproveitamento
+
+
+def test_favoravel_nao_cobra_contraria_quando_ela_ja_existe(server):
+    did = proposta(server, "Decisão zeppelin já contestada", evidence=[
+        {"evidence_id": str(fid("ev-checkout-pagina-unica")), "role": "contradicts"}])
+    res = call(server, "attach_evidence", {
+        "decision_id": did, "role": "supports",
+        "evidence_id": str(fid("ev-checkout-confirm"))}).structured_content
+    assert res["pending"]["on_this_record"] == []
+
+
+def test_idempotencia_devolve_o_registro_gravado_nao_o_novo(server, admin_conn):
+    args = {**PROPOSTA, "title": "Decisão zeppelin gravada primeiro",
+            "context": "Havia atraso.", "idempotency_key": "k-gravado",
+            "alternatives": [{"description": "a", "rejection_reason": "b"}]}
+    a = call(server, "propose_decision", args).structured_content
+    assert a["data"]["reused"] is False
+    assert a["data"]["missing"] == ["evidence"]
+    b = call(server, "propose_decision", {
+        **PROPOSTA, "title": "Decisão zeppelin reenviada", "idempotency_key": "k-gravado"})
+    data = b.structured_content["data"]
+    assert data["reused"] is True
+    assert data["decision_id"] == a["data"]["decision_id"]
+    assert data["slug"] == a["data"]["slug"]
+    assert data["state"] == "proposed"
+    assert data["missing"] == ["evidence"], "o que falta é do registro gravado"
+    assert b.structured_content["pending"]["on_this_record"] == [writes.PROMPTS["evidence"]]
+    assert "não foi aplicado" in b.content[0].text
+    assert count(admin_conn, "SELECT count(*) FROM decision "
+                             "WHERE title = 'Decisão zeppelin reenviada'") == 0
+
+
+def test_slug_nao_termina_em_hifen():
+    """Corte em 80 caracteres logo antes de um espaço deixaria o hífen no fim."""
+    title = "a" * 79 + " zeppelin"
+    assert writes.slug_base(title) == "a" * 79

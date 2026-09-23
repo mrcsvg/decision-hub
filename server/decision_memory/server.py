@@ -17,6 +17,7 @@ import psycopg
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from psycopg_pool import ConnectionPool
+from pydantic import Field
 
 from . import guard, identity, models, pending, reads, writes
 
@@ -217,9 +218,13 @@ def build_server(pool: ConnectionPool, audiences: tuple[str, ...] = ()) -> MCPSe
 
         data, block = with_db(pool, work)
         body = models.ProposeResponse(data=models.ProposeData(**data), pending=block)
-        summary = (f"Decisão registrada como proposta ({data['decision_id']}). Uma pessoa "
-                   "precisa atestá-la e registrar a expectativa; ainda não há superfície "
-                   "de atestação, então ela fica proposta.")
+        if data["reused"]:
+            summary = (f"Essa idempotency_key já tinha registrado a decisão {data['decision_id']} "
+                       f"({data['state']}); o conteúdo desta chamada não foi aplicado.")
+        else:
+            summary = (f"Decisão registrada como proposta ({data['decision_id']}). Uma pessoa "
+                       "precisa atestá-la e registrar a expectativa; ainda não há superfície "
+                       "de atestação, então ela fica proposta.")
         return _result(summary, body, block)
 
     @server.tool(name="attach_evidence", description=DESCRIPTIONS["attach_evidence"],
@@ -229,18 +234,17 @@ def build_server(pool: ConnectionPool, audiences: tuple[str, ...] = ()) -> MCPSe
         role: str,
         evidence_id: str | None = None,
         evidence: dict[str, Any] | None = None,
-        weight: float | None = None,
+        # strict: sem ele, "0.5" e true virariam número em silêncio.
+        weight: Annotated[float | None, Field(strict=True)] = None,
         note: str | None = None,
     ) -> Annotated[t.CallToolResult, models.AttachResponse]:
         def work(conn):
-            data = writes.attach_evidence(conn, decision_id=decision_id, role=role,
-                                          evidence_id=evidence_id, evidence=evidence,
-                                          weight=weight, note=note)
+            data, nudge = writes.attach_evidence(conn, decision_id=decision_id, role=role,
+                                                 evidence_id=evidence_id, evidence=evidence,
+                                                 weight=weight, note=note)
             tags = {r["name"] for r in conn.execute(
                 "SELECT t.name FROM decision_tag x JOIN tag t ON t.id = x.tag_id "
                 "WHERE x.decision_id = %s", (data["decision_id"],)).fetchall()}
-            nudge = ["Só há evidência favorável registrada até agora: houve algo que "
-                     "contradisse a escolha?"] if data["role"] == "supports" else []
             return data, pending.build(conn, context_tags=tags, on_this_record=nudge)
 
         data, block = with_db(pool, work)

@@ -161,6 +161,13 @@ class ProposeData(BaseModel):
     missing: list[str] = Field(
         default_factory=list, description="Campos que tornariam o registro útil."
     )
+    reused: bool = Field(
+        False,
+        description=(
+            "true quando a idempotency_key já tinha registrado esta decisão: volta o registro "
+            "gravado e o conteúdo desta chamada não foi aplicado."
+        ),
+    )
 
 
 class ProposeResponse(BaseModel):

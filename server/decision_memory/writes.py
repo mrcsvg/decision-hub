@@ -36,12 +36,21 @@ DECIDER_NOT_FOUND = (
     "Pessoa não encontrada. Confirme o e-mail com o usuário; o registro não foi criado."
 )
 
+ORIGIN_FROM_INGESTION = (
+    "Identidade de origem (source_system + external_id) só entra pela ingestão do contrato "
+    "(spec/), não por agente; nada foi gravado. Registre a evidência sem source_system e "
+    "external_id, com a url, ou peça a importação a quem administra."
+)
+
 # Mesmas frases do stub: falam só do registro recém-criado.
 PROMPTS = {
     "alternatives": "Sem alternativas descartadas: quais opções foram consideradas e por que perderam?",
     "evidence": "Sem evidência vinculada: o que sustentou ou contradisse essa escolha?",
     "context": "Sem contexto: qual era o problema no momento da decisão?",
 }
+ONLY_SUPPORTS = (
+    "Só há evidência favorável registrada até agora: houve algo que contradisse a escolha?"
+)
 
 
 def _uuid(value: Any, what: str) -> uuid.UUID:
@@ -51,8 +60,59 @@ def _uuid(value: Any, what: str) -> uuid.UUID:
         raise ToolError(f"{what} inválido: {value}. Use search_evidence para obter o id.") from None
 
 
+# Validação de tipo. O schema de entrada já barra boa parte, mas não o que vem
+# dentro de objetos livres (evidence, itens de evidence); e um tipo errado que
+# chegasse ao SQL viraria o erro interno genérico, que não diz o que corrigir.
+
+
+def _opt_text(value: Any, what: str) -> str | None:
+    """Texto opcional; vazio (depois do strip) vale como ausente."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ToolError(f"{what} deve ser texto.")
+    return value if value.strip() else None
+
+
+def _req_text(value: Any, what: str) -> str:
+    text = _opt_text(value, what)
+    if text is None:
+        raise ToolError(f"{what} é obrigatório e não pode ficar em branco.")
+    return text
+
+
+def _text_list(value: Any, what: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ToolError(f"{what} deve ser uma lista de textos.")
+    return value
+
+
+def _weight(value: Any) -> float | None:
+    if value is None:
+        return None
+    # bool é int em Python; aqui não é peso.
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ToolError("weight deve ser um número de 0 a 1.")
+    if not 0 <= value <= 1:
+        raise ToolError("weight vai de 0 a 1.")
+    return float(value)
+
+
+def _role(value: Any) -> str:
+    if value not in ROLES:
+        raise ToolError("role deve ser supports, contradicts ou discarded.")
+    return value
+
+
 def _lock(conn, *parts: object) -> None:
-    """Trava de transação sobre uma chave textual; solta sozinha no commit ou rollback."""
+    """Trava de transação sobre uma chave textual; solta sozinha no commit ou rollback.
+
+    A espera pela trava conta no statement_timeout (5 s, db.py): se a outra
+    transação demorar mais que isso, esta sai com o erro interno genérico, sem
+    gravar nada. Aceitável na v0, em que cada escrita leva milissegundos.
+    """
     conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                  (":".join(str(p) for p in parts),))
 
@@ -64,7 +124,8 @@ def require_principal(conn) -> uuid.UUID:
             "Não consegui identificar sua conta nesta chamada; nada foi gravado. "
             "Conecte pelo gcloud run services proxy (ver README do servidor)."
         )
-    row = conn.execute("SELECT id FROM person WHERE lower(email) = %s", (email,)).fetchone()
+    row = conn.execute("SELECT id FROM person WHERE lower(email) = lower(%s)",
+                       (email,)).fetchone()
     if row is None:
         raise ToolError(
             f"Sua conta {email} não está cadastrada no registro. Peça a quem administra "
@@ -98,8 +159,14 @@ def _tags(conn, link_table: str, fk: str, object_id: uuid.UUID, tags: list[str] 
             "ON CONFLICT DO NOTHING", (object_id, name))
 
 
+def slug_base(title: str) -> str:
+    """Título dobrado, só letras e dígitos separados por hífen, até 80 caracteres."""
+    words = "".join(c if c.isalnum() else " " for c in fold(title)).split()
+    return "-".join(words)[:80].rstrip("-") or "decisao"
+
+
 def _slug(conn, title: str) -> str:
-    base = "-".join("".join(c if c.isalnum() else " " for c in fold(title)).split())[:80] or "decisao"
+    base = slug_base(title)
     # Dois títulos iguais ao mesmo tempo escolheriam o mesmo sufixo.
     _lock(conn, "slug", base)
     taken = {r["slug"] for r in conn.execute(
@@ -134,33 +201,83 @@ def _date(value: str | None) -> date:
         raise ToolError(f"decided_on inválida: {value}. Use o formato AAAA-MM-DD.") from None
 
 
+def _stored_decision(conn, principal: uuid.UUID, key: str) -> dict[str, Any] | None:
+    """O registro já gravado com essa chave, com o que falta calculado dele mesmo."""
+    row = conn.execute(
+        "SELECT d.id::text AS id, d.slug, d.state::text AS state, "
+        "coalesce(btrim(d.context), '') = '' AS no_context, "
+        "NOT EXISTS (SELECT 1 FROM alternative a WHERE a.decision_id = d.id) AS no_alternatives, "
+        "NOT EXISTS (SELECT 1 FROM decision_evidence x WHERE x.decision_id = d.id) AS no_evidence "
+        "FROM idempotency_key k JOIN decision d ON d.id = k.object_id "
+        "WHERE k.principal_person_id = %s AND k.key = %s", (principal, key)).fetchone()
+    if row is None:
+        return None
+    missing = [f for f, absent in (("alternatives", row["no_alternatives"]),
+                                   ("evidence", row["no_evidence"]),
+                                   ("context", row["no_context"])) if absent]
+    return {"decision_id": row["id"], "slug": row["slug"], "state": row["state"],
+            "missing": missing, "reused": True}
+
+
+def _alternatives(value: Any) -> list[tuple[str, str]]:
+    bad = ToolError("Cada alternativa precisa de description e rejection_reason, ambos texto "
+                    "não vazio.")
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise bad
+    out = []
+    for alt in value:
+        if not isinstance(alt, dict):
+            raise bad
+        try:
+            out.append((_req_text(alt.get("description"), "description"),
+                        _req_text(alt.get("rejection_reason"), "rejection_reason")))
+        except ToolError:
+            raise bad from None
+    return out
+
+
+def _evidence_links(value: Any) -> list[tuple[uuid.UUID, str, float | None, str | None]]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, dict) for v in value):
+        raise ToolError("evidence deve ser uma lista de objetos {evidence_id, role}.")
+    return [(_uuid(_req_text(link.get("evidence_id"), "evidence_id"), "evidence_id"),
+             _role(link.get("role")), _weight(link.get("weight")),
+             _opt_text(link.get("note"), "note")) for link in value]
+
+
 def propose_decision(conn, *, title: str, description: str, decider_email: str,
                      context: str | None, decided_on: str | None, door: str,
                      project: str | None, alternatives: list[dict[str, str]] | None,
                      tags: list[str] | None, evidence: list[dict[str, Any]] | None,
                      idempotency_key: str | None) -> tuple[dict[str, Any], list[str]]:
     principal = require_principal(conn)
-    missing = [f for f, v in (("alternatives", alternatives), ("evidence", evidence),
-                              ("context", context)) if not v]
-    prompts = [PROMPTS[f] for f in missing]
+    title = _req_text(title, "title")
+    description = _req_text(description, "description")
+    context = _opt_text(context, "context")
+    alts = _alternatives(alternatives)
+    links = _evidence_links(evidence)
+    tags = _text_list(tags, "tags")
+    idempotency_key = _opt_text(idempotency_key, "idempotency_key")
 
     if idempotency_key:
         # Serializa chamadas com a mesma (pessoa, chave): a segunda espera a
-        # primeira terminar e então encontra a chave já gravada.
+        # primeira terminar e então encontra a chave já gravada. O que volta é
+        # o registro gravado; o conteúdo desta chamada não é aplicado.
         _lock(conn, "idempotency", principal, idempotency_key)
-        row = conn.execute(
-            "SELECT d.id::text AS id, d.slug FROM idempotency_key k JOIN decision d "
-            "ON d.id = k.object_id WHERE k.principal_person_id = %s AND k.key = %s",
-            (principal, idempotency_key)).fetchone()
-        if row:
-            return {"decision_id": row["id"], "slug": row["slug"], "missing": missing}, prompts
+        stored = _stored_decision(conn, principal, idempotency_key)
+        if stored:
+            return stored, [PROMPTS[f] for f in stored["missing"]]
 
     if door not in ("one_way", "two_way"):
         raise ToolError("door deve ser one_way ou two_way.")
     decider = conn.execute("SELECT id FROM person WHERE lower(email) = lower(%s)",
-                           (decider_email.strip(),)).fetchone()
+                           (_opt_text(decider_email, "decider_email") or "",)).fetchone()
     if decider is None:
         raise ToolError(DECIDER_NOT_FOUND)
+    project = _opt_text(project, "project")
     project_id = None
     if project:
         try:
@@ -173,10 +290,7 @@ def propose_decision(conn, *, title: str, description: str, decider_email: str,
             raise ToolError(f"Projeto não encontrado: {project}. Confirme o nome com o usuário; "
                             "o registro não foi criado.")
         project_id = row["id"]
-    for alt in alternatives or []:
-        if not alt.get("description") or not alt.get("rejection_reason"):
-            raise ToolError("Cada alternativa precisa de description e rejection_reason.")
-    decided = _date(decided_on)
+    decided = _date(_opt_text(decided_on, "decided_on"))
 
     slug = _slug(conn, title)
     decision_id = conn.execute(
@@ -184,28 +298,26 @@ def propose_decision(conn, *, title: str, description: str, decider_email: str,
         "decider_person_id, project_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
         (slug, title, context, description, door, decided, decider["id"], project_id),
     ).fetchone()["id"]
-    for alt in alternatives or []:
+    for alt_description, rejection_reason in alts:
         conn.execute("INSERT INTO alternative (decision_id, description, rejection_reason) "
-                     "VALUES (%s, %s, %s)", (decision_id, alt["description"], alt["rejection_reason"]))
+                     "VALUES (%s, %s, %s)", (decision_id, alt_description, rejection_reason))
     _tags(conn, "decision_tag", "decision_id", decision_id, tags)
-    for link in evidence or []:
-        _link(conn, decision_id, _uuid(link.get("evidence_id"), "evidence_id"),
-              link.get("role"), link.get("weight"), link.get("note"))
+    for evidence_id, role, weight, note in links:
+        _link(conn, decision_id, evidence_id, role, weight, note)
     _provenance(conn, "decision", decision_id, principal)
     if idempotency_key:
         conn.execute("INSERT INTO idempotency_key (principal_person_id, key, object_type, "
                      "object_id) VALUES (%s, %s, 'decision', %s)",
                      (principal, idempotency_key, decision_id))
-    return {"decision_id": str(decision_id), "slug": slug, "missing": missing}, prompts
+    missing = [f for f, v in (("alternatives", alts), ("evidence", links),
+                              ("context", context)) if not v]
+    return ({"decision_id": str(decision_id), "slug": slug, "state": "proposed",
+             "missing": missing, "reused": False}, [PROMPTS[f] for f in missing])
 
 
-def _link(conn, decision_id: uuid.UUID, evidence_id: uuid.UUID, role: str | None,
+def _link(conn, decision_id: uuid.UUID, evidence_id: uuid.UUID, role: str,
           weight: float | None, note: str | None) -> tuple[str, bool]:
     """Vincula; se já havia vínculo, devolve o papel original sem mudar nada."""
-    if role not in ROLES:
-        raise ToolError("role deve ser supports, contradicts ou discarded.")
-    if weight is not None and not 0 <= weight <= 1:
-        raise ToolError("weight vai de 0 a 1.")
     _evidence_exists(conn, evidence_id)
     inserted = conn.execute(
         "INSERT INTO decision_evidence (decision_id, evidence_id, role, weight, note) "
@@ -219,67 +331,91 @@ def _link(conn, decision_id: uuid.UUID, evidence_id: uuid.UUID, role: str | None
     return existing["role"], True
 
 
+def _new_evidence(conn, evidence: Any, principal: uuid.UUID) -> tuple[uuid.UUID, bool]:
+    """Resolve o objeto evidence: reaproveita pela origem ou cria sem origem.
+
+    Agente nunca cria evidência com (source_system, external_id): essa
+    identidade vem só da ingestão pelo contrato. Chaves que o agente mandar
+    além das previstas (conformance_level, normalized, ...) são ignoradas.
+    """
+    if not isinstance(evidence, dict):
+        raise ToolError("evidence deve ser um objeto {kind, title, strength, ...}.")
+    title = _opt_text(evidence.get("title"), "title")
+    summary = _opt_text(evidence.get("summary"), "summary")
+    url = _opt_text(evidence.get("url"), "url")
+    system = _opt_text(evidence.get("source_system"), "source_system")
+    external = _opt_text(evidence.get("external_id"), "external_id")
+    if (system is None) != (external is None):
+        raise ToolError("source_system e external_id vão juntos: informe os dois ou nenhum.")
+    if system is not None:
+        row = conn.execute("SELECT id FROM evidence WHERE source_system = %s AND external_id = %s",
+                           (system, external)).fetchone()
+        if row is None:
+            raise ToolError(ORIGIN_FROM_INGESTION)
+        return row["id"], True
+
+    kind, strength = evidence.get("kind"), evidence.get("strength")
+    if kind not in EVIDENCE_KINDS:
+        raise ToolError(f"kind deve ser um de: {', '.join(EVIDENCE_KINDS)}.")
+    if strength not in STRENGTHS:
+        raise ToolError(f"strength deve ser um de: {', '.join(STRENGTHS)}.")
+    if title is None:
+        raise ToolError("A evidência nova precisa de title, texto não vazio.")
+    eid = conn.execute(
+        "INSERT INTO evidence (kind, title, summary, url, strength) "
+        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+        (kind, title, summary, url, strength)).fetchone()["id"]
+    _provenance(conn, "evidence", eid, principal)
+    return eid, False
+
+
 def attach_evidence(conn, *, decision_id: str, role: str, evidence_id: str | None,
                     evidence: dict[str, Any] | None, weight: float | None,
-                    note: str | None) -> dict[str, Any]:
+                    note: str | None) -> tuple[dict[str, Any], list[str]]:
     principal = require_principal(conn)
     did = _uuid(decision_id, "decision_id")
     _decision_exists(conn, did)
+    if evidence_id and evidence:
+        raise ToolError("Informe um dos dois, não ambos: evidence_id de uma evidência existente "
+                        "ou o objeto evidence.")
     if not evidence_id and not evidence:
         raise ToolError("Informe evidence_id de uma evidência existente ou o objeto evidence.")
+    role = _role(role)
+    weight = _weight(weight)
+    note = _opt_text(note, "note")
 
-    reused = False
     if evidence_id:
-        eid = _uuid(evidence_id, "evidence_id")
-        reused = True
+        eid, reused = _uuid(_req_text(evidence_id, "evidence_id"), "evidence_id"), True
     else:
-        system, external = evidence.get("source_system"), evidence.get("external_id")
-        if bool(system) != bool(external):
-            raise ToolError("source_system e external_id vão juntos: informe os dois ou nenhum.")
-        if system:
-            # Duas chamadas com a mesma origem inédita não podem ambas inserir.
-            _lock(conn, "evidence", system, external)
-        row = conn.execute("SELECT id FROM evidence WHERE source_system = %s AND external_id = %s",
-                           (system, external)).fetchone() if system else None
-        if row:
-            eid, reused = row["id"], True
-        else:
-            kind, strength = evidence.get("kind"), evidence.get("strength")
-            if kind not in EVIDENCE_KINDS:
-                raise ToolError(f"kind deve ser um de: {', '.join(EVIDENCE_KINDS)}.")
-            if strength not in STRENGTHS:
-                raise ToolError(f"strength deve ser um de: {', '.join(STRENGTHS)}.")
-            if not evidence.get("title"):
-                raise ToolError("A evidência nova precisa de title.")
-            if kind == "experiment" and system:
-                raise ToolError(
-                    "Experimento de plataforma entra pela ingestão do contrato (spec/), não por "
-                    "agente. Registre sem source_system/external_id, com a url, ou peça a "
-                    "importação a quem administra.")
-            eid = conn.execute(
-                "INSERT INTO evidence (kind, title, summary, url, source_system, external_id, "
-                "strength) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
-                (kind, evidence["title"], evidence.get("summary"), evidence.get("url"),
-                 system or None, external or None, strength)).fetchone()["id"]
-            _provenance(conn, "evidence", eid, principal)
+        eid, reused = _new_evidence(conn, evidence, principal)
 
     final_role, already = _link(conn, did, eid, role, weight, note)
-    state = conn.execute(
+    row = conn.execute(
         "SELECT CASE WHEN EXISTS (SELECT 1 FROM provenance WHERE object_type = 'evidence' "
         "AND object_id = %s AND attested_at IS NOT NULL) THEN 'attested' ELSE 'proposed' END "
-        "AS s", (eid,)).fetchone()["s"]
-    return {"decision_id": str(did), "evidence_id": str(eid), "role": final_role,
-            "reused_existing": reused, "already_linked": already, "state": state}
+        "AS state, EXISTS (SELECT 1 FROM decision_evidence WHERE decision_id = %s "
+        "AND role = 'contradicts') AS contested", (eid, did)).fetchone()
+    # Só cobra a evidência contrária quando este vínculo é novo, favorável, e a
+    # decisão ainda não tem nenhuma contrária.
+    nudge = ([ONLY_SUPPORTS] if final_role == "supports" and not already
+             and not row["contested"] else [])
+    return ({"decision_id": str(did), "evidence_id": str(eid), "role": final_role,
+             "reused_existing": reused, "already_linked": already, "state": row["state"]},
+            nudge)
 
 
 def record_learning(conn, *, summary: str, decision_ids: list[str] | None,
                     evidence_ids: list[str] | None, tags: list[str] | None) -> dict[str, Any]:
     principal = require_principal(conn)
+    summary = _req_text(summary, "summary")
+    decision_ids = _text_list(decision_ids, "decision_ids")
+    evidence_ids = _text_list(evidence_ids, "evidence_ids")
+    tags = _text_list(tags, "tags")
     if not decision_ids and not evidence_ids:
         raise ToolError("Uma lição precisa de origem: informe decision_ids ou evidence_ids.")
     # dict.fromkeys: tira repetidos sem mudar a ordem, e o vínculo não bate na PK.
-    dids = list(dict.fromkeys(_uuid(d, "decision_id") for d in decision_ids or []))
-    eids = list(dict.fromkeys(_uuid(e, "evidence_id") for e in evidence_ids or []))
+    dids = list(dict.fromkeys(_uuid(d, "decision_id") for d in decision_ids))
+    eids = list(dict.fromkeys(_uuid(e, "evidence_id") for e in evidence_ids))
     for d in dids:
         _decision_exists(conn, d)
     for e in eids:
