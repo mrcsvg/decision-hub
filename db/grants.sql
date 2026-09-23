@@ -1,5 +1,6 @@
 -- Papel do servidor MCP (server/decision_memory). Aplicar depois de schema.sql;
--- rodar de novo é seguro. A senha não fica aqui:
+-- rodar de novo é seguro, e necessário depois de criar tabela nova: os GRANT
+-- com ON ALL TABLES só alcançam as tabelas que já existem. A senha não fica aqui:
 --   ALTER ROLE dm_app PASSWORD '...';
 -- e vai para o Secret Manager (ver server/decision_memory/README.md).
 --

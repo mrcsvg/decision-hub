@@ -8,10 +8,10 @@ Campo novo entra como opcional. Tornar obrigatório um campo existente é mudan�
 
 ## Mudanças no schema do banco
 
-Toda invariante que o banco garante tem teste em `db/test_invariants.sql`. Mudança que altera ou cria invariante altera ou cria o teste correspondente.
+Toda invariante que o banco garante tem teste em `db/test_invariants.sql`. Mudança que altera ou cria invariante altera ou cria o teste correspondente. As invariantes incluem o papel `dm_app` do servidor MCP, por isso `db/grants.sql` roda antes dos testes.
 
 ```bash
-psql -v ON_ERROR_STOP=1 -d <banco_vazio> -f db/schema.sql -f db/test_invariants.sql
+psql -v ON_ERROR_STOP=1 -d <banco_vazio> -f db/schema.sql -f db/grants.sql -f db/test_invariants.sql
 ```
 
 ## Ferramentas MCP
