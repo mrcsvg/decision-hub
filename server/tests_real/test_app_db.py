@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
+import logging
+
 import psycopg
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from decision_memory import seed
 from decision_memory.db import POOL_TIMEOUT_S, STATEMENT_TIMEOUT_MS, connection_kwargs
+from decision_memory.server import with_db
 
 
 def test_servidor_conecta_como_dm_app(pool):
@@ -44,3 +49,38 @@ def test_timeout_vai_na_conexao_em_qualquer_forma_de_url(url):
     assert info["options"] == f"-c statement_timeout={STATEMENT_TIMEOUT_MS}"
     assert info["dbname"] == "decision_memory"
     assert info.get("host") in ("/cloudsql/proj:regiao:inst", "localhost")
+
+
+def test_erro_de_banco_nao_vai_ao_log_com_o_dado_da_linha(pool, caplog):
+    """O str() do erro do psycopg traz o DETAIL, com o valor da linha (um e-mail,
+    aqui). No log vão só o código, a mensagem principal e a restrição."""
+    caplog.set_level(logging.INFO, logger="decision_memory")
+
+    def work(conn):
+        conn.execute("CREATE TEMP TABLE pessoa_tmp (email text CONSTRAINT pessoa_tmp_email UNIQUE)")
+        conn.execute("INSERT INTO pessoa_tmp VALUES ('segredo@exemplo.com')")
+        conn.execute("INSERT INTO pessoa_tmp VALUES ('segredo@exemplo.com')")
+
+    with pytest.raises(ToolError) as err:
+        with_db(pool, work)
+    assert "segredo" not in str(err.value)
+    assert "segredo" not in caplog.text
+    [line] = [json.loads(r.getMessage()) for r in caplog.records if r.name == "decision_memory"]
+    assert line["event"] == "db_error" and line["severity"] == "ERROR"
+    assert line["type"] == "UniqueViolation" and line["sqlstate"] == "23505"
+    assert line["constraint"] == "pessoa_tmp_email"
+    assert "duplicate key" in line["message"] and "error" not in line
+    assert line["ref"] in str(err.value)
+
+
+def test_erro_que_nao_e_de_banco_vai_ao_log_so_com_o_tipo(pool, caplog):
+    caplog.set_level(logging.INFO, logger="decision_memory")
+
+    def work(conn):
+        raise KeyError("segredo@exemplo.com")
+
+    with pytest.raises(ToolError):
+        with_db(pool, work)
+    assert "segredo" not in caplog.text
+    [line] = [json.loads(r.getMessage()) for r in caplog.records if r.name == "decision_memory"]
+    assert (line["event"], line["type"], line["bug"]) == ("internal_error", "KeyError", True)

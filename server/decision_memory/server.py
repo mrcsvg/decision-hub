@@ -104,17 +104,21 @@ def with_db(pool: ConnectionPool, work: Callable[[psycopg.Connection], T]) -> T:
     except ToolError:
         raise
     except Exception as exc:
-        # Qualquer outra falha, de banco ou não, sai com a mesma mensagem: o
-        # detalhe (SQL, traceback) fica no log, achável pela ref.
+        # Qualquer outra falha, de banco ou não, sai com a mesma mensagem; o log,
+        # achável pela ref, diz o que houve. Sem str(exc): no erro do psycopg ele
+        # traz o DETAIL do Postgres, com o valor da linha (um e-mail, por
+        # exemplo); fora do banco, pode trazer argumento de quem chama. Vão só o
+        # tipo, o código, a mensagem principal e a restrição.
         ref = uuid.uuid4().hex[:8]
         bug = not isinstance(exc, psycopg.OperationalError)
+        diag = exc.diag if isinstance(exc, psycopg.Error) else None
         # `severity` é o campo que o Cloud Logging lê de uma linha JSON no stdout.
         log.error(json.dumps({"severity": "ERROR",
-                              "event": "db_error" if isinstance(exc, psycopg.Error)
-                              else "internal_error",
+                              "event": "db_error" if diag is not None else "internal_error",
                               "ref": ref, "bug": bug, "type": type(exc).__name__,
-                              "sqlstate": getattr(exc, "sqlstate", None),
-                              "error": str(exc)}))
+                              "sqlstate": diag.sqlstate if diag else None,
+                              "message": diag.message_primary if diag else None,
+                              "constraint": diag.constraint_name if diag else None}))
         raise ToolError(
             f"Erro interno ao acessar o registro (ref {ref}). Nada foi gravado. "
             "Tente de novo; se persistir, avise quem administra o servidor."

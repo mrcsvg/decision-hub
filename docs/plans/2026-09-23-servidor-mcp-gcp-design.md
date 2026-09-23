@@ -167,3 +167,5 @@ O que a implementação mudou em relação ao texto acima. O detalhe de cada pon
 - **Entrada:** tags de escrita seguem o padrão do contrato (`^[a-z0-9][a-z0-9 _./-]*$`); texto
   com `\x00` é recusado em qualquer ferramenta.
 - **Transporte:** só POST em `/mcp`; GET, DELETE e os demais respondem 405 com `Allow: POST`.
+- **Log de erro:** o "detalhe" que vai ao log é o tipo, o `sqlstate`, a mensagem principal e a
+  restrição — não o texto do erro, cujo `DETAIL` traz valor de linha (e-mail, por exemplo).
