@@ -101,8 +101,19 @@ URLS=$(gcloud run services describe decision-memory --project $PROJECT --region 
     --update-env-vars "^;^DM_EXPECTED_AUDIENCE=$URLS"
 
 # 5. Conferir que está fechado. A identidade depende disso.
-gcloud run services get-iam-policy decision-memory --project $PROJECT --region $REGION \
-  | grep -q allUsers && echo "ABERTO — remova allUsers antes de usar" || echo "fechado"
+#    allUsers: qualquer um chama sem token, e um Authorization forjado chega intacto ao servidor.
+#    allAuthenticatedUsers: qualquer conta Google do mundo lê o registro, não só quem recebeu acesso.
+#    invoker-iam-disabled: o Cloud Run pula a checagem de IAM e não valida token nenhum, mesmo
+#    sem allUsers na política — o mesmo que aberto.
+POLICY=$(gcloud run services get-iam-policy decision-memory --project $PROJECT \
+  --region $REGION --format json)
+IAM_OFF=$(gcloud run services describe decision-memory --project $PROJECT --region $REGION \
+  --format='value(metadata.annotations["run.googleapis.com/invoker-iam-disabled"])')
+if printf '%s' "$POLICY" | grep -qE 'allUsers|allAuthenticatedUsers' || [ "$IAM_OFF" = "true" ]; then
+  echo "ABERTO — remova allUsers/allAuthenticatedUsers e religue o IAM (--invoker-iam-check) antes de usar"
+else
+  echo "fechado"
+fi
 
 # 6. Acesso por pessoa
 gcloud run services add-iam-policy-binding decision-memory --project $PROJECT \
