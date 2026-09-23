@@ -3043,6 +3043,65 @@ def test_slug_nao_termina_em_hifen():
     """Corte em 80 caracteres logo antes de um espaço deixaria o hífen no fim."""
     title = "a" * 79 + " zeppelin"
     assert writes.slug_base(title) == "a" * 79
+
+
+def test_email_do_decisor_com_espacos_e_caixa(server, admin_conn):
+    did = proposta(server, "Decisão zeppelin com e-mail folgado",
+                   decider_email=f"  {ANA.upper()} ")
+    email = admin_conn.execute(
+        "SELECT p.email FROM decision d JOIN person p ON p.id = d.decider_person_id "
+        "WHERE d.id = %s", (did,)).fetchone()[0]
+    assert email == ANA
+
+
+def test_idempotency_key_em_branco_e_recusada(server, admin_conn):
+    title = "Decisão zeppelin com chave em branco"
+    message = erro(server, "propose_decision",
+                   {**PROPOSTA, "title": title, "idempotency_key": "   "})
+    assert "idempotency_key" in message
+    assert count(admin_conn, "SELECT count(*) FROM decision WHERE title = %s", title) == 0
+
+
+@pytest.mark.parametrize("tag", ["​", "a\tb", "🚀", "#frete"])
+def test_tag_fora_do_padrao_do_contrato_e_recusada(server, admin_conn, tag):
+    title = "Decisão zeppelin com tag estranha"
+    message = erro(server, "propose_decision", {**PROPOSTA, "title": title, "tags": [tag]})
+    assert repr(writes.fold(tag).strip()) in message
+    assert writes.TAG_PATTERN in message
+    assert count(admin_conn, "SELECT count(*) FROM decision WHERE title = %s", title) == 0
+
+
+def test_tag_no_padrao_do_contrato_e_aceita(server, admin_conn):
+    lid = call(server, "record_learning", {
+        "summary": "Lição zeppelin com tags no padrão do contrato de ingestão",
+        "decision_ids": [proposta(server, "Decisão zeppelin com tag boa")],
+        "tags": ["ok-tag", "Growth/Pricing v2.1", "  "],
+    }).structured_content["data"]["learning_id"]
+    tags = {r[0] for r in admin_conn.execute(
+        "SELECT t.name FROM learning_tag x JOIN tag t ON t.id = x.tag_id "
+        "WHERE x.learning_id = %s", (lid,))}
+    assert tags == {"ok-tag", "growth/pricing v2.1"}
+
+
+def test_padrao_de_tag_e_o_do_contrato():
+    import json
+
+    from conftest import ROOT
+    schema = json.loads((ROOT / "spec" / "experiment-record-v0.schema.json").read_text())
+    patterns = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "tags" in node and isinstance(node["tags"], dict):
+                patterns.add(node["tags"]["items"]["pattern"])
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(schema)
+    assert patterns == {writes.TAG_PATTERN}
 ```
 
 **Passo 2: rodar e ver falhar.** Esperado: `Unknown tool: propose_decision` ou equivalente.
@@ -3060,6 +3119,7 @@ agente preenche (db/grants.sql) — nada aqui altera o que já existe.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import date
 from typing import Any
@@ -3073,6 +3133,13 @@ from .guard import fold
 EVIDENCE_KINDS = ("experiment", "study", "analysis", "document", "external")
 STRENGTHS = ("causal", "correlational", "anecdotal")
 ROLES = ("supports", "contradicts", "discarded")
+
+# Padrão de tag do contrato de ingestão (spec/experiment-record-v0.schema.json);
+# há teste que confere que é o mesmo. Tag de agente segue a mesma regra da
+# tag importada.
+TAG_PATTERN = "^[a-z0-9][a-z0-9 _./-]*$"
+# Sem as âncoras, para fullmatch: o '$' aceitaria um '\n' no fim.
+_TAG_RE = re.compile(TAG_PATTERN.removeprefix("^").removesuffix("$"))
 
 # Constante, não parâmetro: o banco não impede dm_app de gravar 'human' ou
 # 'import' em provenance, então é o servidor que garante que escrita por MCP
@@ -3198,9 +3265,16 @@ def _provenance(conn, object_type: str, object_id: uuid.UUID, principal: uuid.UU
 def normalize_tags(tags: list[str] | None) -> list[str]:
     """Minúsculas, sem acento e sem espaço nas pontas; vazias somem, repetidas também.
 
-    Satisfaz o CHECK de tag (name = lower(name) AND name <> '').
+    O que sobra tem de casar com TAG_PATTERN, o padrão do contrato — o que
+    também satisfaz o CHECK de tag (name = lower(name) AND name <> ''). Fora
+    dele (tab, caractere invisível, emoji, '#'), recusa dizendo qual tag.
     """
-    return sorted({fold(tag).strip() for tag in tags or []} - {""})
+    names = {fold(tag).strip() for tag in tags or []} - {""}
+    for name in sorted(names):
+        if not _TAG_RE.fullmatch(name):
+            raise ToolError(f"Tag fora do padrão {TAG_PATTERN}: {name!r}. Use letras "
+                            "minúsculas, dígitos, espaço e _ . / -; nada foi gravado.")
+    return sorted(names)
 
 
 def _tags(conn, link_table: str, fk: str, object_id: uuid.UUID, tags: list[str] | None) -> None:
@@ -3312,7 +3386,12 @@ def propose_decision(conn, *, title: str, description: str, decider_email: str,
     alts = _alternatives(alternatives)
     links = _evidence_links(evidence)
     tags = _text_list(tags, "tags")
-    idempotency_key = _opt_text(idempotency_key, "idempotency_key")
+    normalize_tags(tags)  # recusa tag fora do padrão antes de qualquer escrita
+    if idempotency_key is not None and _opt_text(idempotency_key, "idempotency_key") is None:
+        # Chave em branco não vira "sem chave" em silêncio: o agente achou que
+        # tinha proteção contra duplicata.
+        raise ToolError("idempotency_key em branco: envie uma chave não vazia ou omita o "
+                        "campo; nada foi gravado.")
 
     if idempotency_key:
         # Serializa chamadas com a mesma (pessoa, chave): a segunda espera a
@@ -3325,8 +3404,9 @@ def propose_decision(conn, *, title: str, description: str, decider_email: str,
 
     if door not in ("one_way", "two_way"):
         raise ToolError("door deve ser one_way ou two_way.")
-    decider = conn.execute("SELECT id FROM person WHERE lower(email) = lower(%s)",
-                           (_opt_text(decider_email, "decider_email") or "",)).fetchone()
+    decider = conn.execute(
+        "SELECT id FROM person WHERE lower(btrim(email)) = lower(%s)",
+        ((_opt_text(decider_email, "decider_email") or "").strip(),)).fetchone()
     if decider is None:
         raise ToolError(DECIDER_NOT_FOUND)
     project = _opt_text(project, "project")
@@ -3463,6 +3543,7 @@ def record_learning(conn, *, summary: str, decision_ids: list[str] | None,
     decision_ids = _text_list(decision_ids, "decision_ids")
     evidence_ids = _text_list(evidence_ids, "evidence_ids")
     tags = _text_list(tags, "tags")
+    normalize_tags(tags)  # recusa tag fora do padrão antes de qualquer escrita
     if not decision_ids and not evidence_ids:
         raise ToolError("Uma lição precisa de origem: informe decision_ids ou evidence_ids.")
     # dict.fromkeys: tira repetidos sem mudar a ordem, e o vínculo não bate na PK.

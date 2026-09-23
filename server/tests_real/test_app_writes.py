@@ -450,3 +450,62 @@ def test_slug_nao_termina_em_hifen():
     """Corte em 80 caracteres logo antes de um espaço deixaria o hífen no fim."""
     title = "a" * 79 + " zeppelin"
     assert writes.slug_base(title) == "a" * 79
+
+
+def test_email_do_decisor_com_espacos_e_caixa(server, admin_conn):
+    did = proposta(server, "Decisão zeppelin com e-mail folgado",
+                   decider_email=f"  {ANA.upper()} ")
+    email = admin_conn.execute(
+        "SELECT p.email FROM decision d JOIN person p ON p.id = d.decider_person_id "
+        "WHERE d.id = %s", (did,)).fetchone()[0]
+    assert email == ANA
+
+
+def test_idempotency_key_em_branco_e_recusada(server, admin_conn):
+    title = "Decisão zeppelin com chave em branco"
+    message = erro(server, "propose_decision",
+                   {**PROPOSTA, "title": title, "idempotency_key": "   "})
+    assert "idempotency_key" in message
+    assert count(admin_conn, "SELECT count(*) FROM decision WHERE title = %s", title) == 0
+
+
+@pytest.mark.parametrize("tag", ["​", "a\tb", "🚀", "#frete"])
+def test_tag_fora_do_padrao_do_contrato_e_recusada(server, admin_conn, tag):
+    title = "Decisão zeppelin com tag estranha"
+    message = erro(server, "propose_decision", {**PROPOSTA, "title": title, "tags": [tag]})
+    assert repr(writes.fold(tag).strip()) in message
+    assert writes.TAG_PATTERN in message
+    assert count(admin_conn, "SELECT count(*) FROM decision WHERE title = %s", title) == 0
+
+
+def test_tag_no_padrao_do_contrato_e_aceita(server, admin_conn):
+    lid = call(server, "record_learning", {
+        "summary": "Lição zeppelin com tags no padrão do contrato de ingestão",
+        "decision_ids": [proposta(server, "Decisão zeppelin com tag boa")],
+        "tags": ["ok-tag", "Growth/Pricing v2.1", "  "],
+    }).structured_content["data"]["learning_id"]
+    tags = {r[0] for r in admin_conn.execute(
+        "SELECT t.name FROM learning_tag x JOIN tag t ON t.id = x.tag_id "
+        "WHERE x.learning_id = %s", (lid,))}
+    assert tags == {"ok-tag", "growth/pricing v2.1"}
+
+
+def test_padrao_de_tag_e_o_do_contrato():
+    import json
+
+    from conftest import ROOT
+    schema = json.loads((ROOT / "spec" / "experiment-record-v0.schema.json").read_text())
+    patterns = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "tags" in node and isinstance(node["tags"], dict):
+                patterns.add(node["tags"]["items"]["pattern"])
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(schema)
+    assert patterns == {writes.TAG_PATTERN}
