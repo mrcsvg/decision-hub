@@ -9,7 +9,9 @@ experimento de invocação.
 ## Como a pessoa usa
 
 Pré-requisitos: ter `roles/run.invoker` no serviço e, para escrever, estar cadastrada em
-`person` (sem cadastro, a leitura funciona e a escrita é recusada).
+`person` (sem cadastro, a leitura funciona e a escrita é recusada). O e-mail cadastrado tem de
+ser o da conta Google com que o gcloud está logado (`gcloud auth list`), que pode não ser o
+e-mail do git.
 
 ```bash
 gcloud auth login
@@ -47,7 +49,15 @@ docker run --rm -p 8081:8080 -e DM_TODAY=2026-09-22 \
 ## Deploy
 
 Uma vez por projeto. Com o [Cloud SQL Auth Proxy](../../README.md#instância-no-cloud-sql) na
-porta 5433 e a senha do `dm_admin` em `PGPASSWORD`.
+porta 5433, a senha do `dm_admin` em `PGPASSWORD`, as APIs ligadas e as dependências do
+servidor no `.venv` (a carga do passo 2 as usa):
+
+```bash
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com secretmanager.googleapis.com sqladmin.googleapis.com \
+  --project ufpr-ppgcd
+uv pip install -p .venv/bin/python -r server/requirements-app.txt
+```
 
 **Antes do passo 2, uma decisão em aberto.** O passo 2 carrega no banco compartilhado o corpus
 de `server/fixtures/`, que é fictício, e marca como atestado por `--attested-by` o que as
@@ -66,11 +76,18 @@ ADMIN="host=127.0.0.1 port=5433 dbname=decision_memory user=dm_admin"
 #    nova chegar ao dm_app), e a senha dele
 psql "$ADMIN" -v ON_ERROR_STOP=1 \
   -f db/migrations/2026-09-23-idempotency-key.sql -f db/grants.sql
+#    A senha vai por variável do psql, pela entrada padrão: fora da linha de comando (ps) e
+#    do histórico do shell. O servidor ainda pode registrá-la no log do comando; antes,
+#    confira que `SHOW log_statement` responde none (ddl, mod e all registram ALTER ROLE) e
+#    que log_min_duration_statement não é 0.
 APP_PASSWORD=$(openssl rand -base64 32)
-psql "$ADMIN" -c "ALTER ROLE dm_app PASSWORD '$APP_PASSWORD'"
+psql "$ADMIN" -v ON_ERROR_STOP=1 -v pw="$APP_PASSWORD" <<'SQL'
+ALTER ROLE dm_app PASSWORD :'pw';
+SQL
 
 # 2. Dados: fixtures + pessoas reais (CSV name,email, fora do git). Ver a decisão acima.
-#    --attested-by precisa estar entre as pessoas cadastradas (fixtures ou CSV).
+#    --attested-by precisa estar entre as pessoas cadastradas (fixtures ou CSV). O e-mail de
+#    cada pessoa é o da conta Google do gcloud dela (`gcloud auth list`), não o do git.
 PYTHONPATH=server .venv/bin/python -m decision_memory.seed --database-url "$ADMIN" \
   --attested-by voce@exemplo.com --people pessoas.csv
 
@@ -93,9 +110,13 @@ gcloud run deploy decision-memory --source server --project $PROJECT --region $R
   --concurrency 8 \
   --set-env-vars "DM_DATABASE_URL=postgresql://dm_app@/decision_memory?host=/cloudsql/$INSTANCE,DM_EXPECTED_AUDIENCE=$AUDIENCE" \
   --set-secrets DM_DATABASE_PASSWORD=dm-app-password:latest
-#    Conferir com as URLs que o Cloud Run de fato atribuiu; se houver outras, aceitar todas.
-URLS=$(gcloud run services describe decision-memory --project $PROJECT --region $REGION \
-  --format 'value(status.url,metadata.annotations."run.googleapis.com/urls")' | tr -d '[]"' | tr '\t' ',')
+#    O Cloud Run pode ter atribuído mais de uma URL (a determinística e a antiga, com hash).
+#    Junta todas com a de cima, sem repetição; se sobrar mais que ela, aceitar todas.
+URLS=$( { echo "$AUDIENCE"
+          gcloud run services describe decision-memory --project $PROJECT --region $REGION \
+            --format 'value(status.url,metadata.annotations."run.googleapis.com/urls")'
+        } | tr -d '[]" ' | tr '\t,' '\n\n' | grep . | sort -u | paste -sd, -)
+echo "URLs aceitas: $URLS"
 [ "$URLS" = "$AUDIENCE" ] || \
   gcloud run services update decision-memory --project $PROJECT --region $REGION \
     --update-env-vars "^;^DM_EXPECTED_AUDIENCE=$URLS"
@@ -188,6 +209,12 @@ curl -s localhost:8080/mcp \
 - **Busca**: só as 32 primeiras palavras da consulta contam (`MAX_TERMS`).
 - **Banco**: todo comando SQL tem teto de 5 s (`statement_timeout`), e a espera por conexão
   livre no pool também; estourou, a ferramenta responde erro interno com ref.
+- **Argumentos**: chave com confiança ou expectativa no nome — `confidence`, `confianca`,
+  `expectation`, `expectativa`, `certeza` e afins, dobrados, em qualquer nível de objeto ou lista —
+  é recusada antes da ferramenta, mesmo quando o nome é estatístico, como
+  `confidence_interval`. De propósito: o agente não tem por onde mandar esses campos, e
+  distinguir o intervalo de confiança da confiança da pessoa abriria a porta. Só chaves; valor
+  com o termo passa.
 - **Argumentos**: texto com caractere nulo (`\x00`) é recusado antes da ferramenta, em
   qualquer das seis; o Postgres não guarda esse caractere.
 - **GET /mcp responde 405: sem sessão, não há fluxo SSE do servidor.** DELETE também, como
