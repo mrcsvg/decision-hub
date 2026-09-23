@@ -138,8 +138,11 @@ curl -s localhost:8080/mcp \
 1. A resposta traz "Checkout em página única" — leitura e conexão por socket funcionam.
 2. No Claude Code, peça para registrar uma decisão de teste. Deve voltar `state: proposed`.
    Se voltar "Não consegui identificar sua conta", o token não chegou ou foi recusado (`aud`
-   fora de `DM_EXPECTED_AUDIENCE` e do cliente do gcloud, ou `iss` que não é o Google). Se
-   voltar "Sua conta não está cadastrada", falta o e-mail em `person`.
+   fora de `DM_EXPECTED_AUDIENCE` e do cliente do gcloud, ou `iss` que não é o Google). Nos
+   logs do serviço, a linha `identity_rejected` diz o motivo (`no_bearer`, `unreadable`,
+   `bad_iss`, `bad_aud`, `unverified`, `no_email`), o header lido e o `aud`/`iss` recusados —
+   nunca o e-mail nem o token. Sem nenhuma linha dessas, o token nem chegou. Se voltar "Sua
+   conta não está cadastrada", falta o e-mail em `person`.
 3. Em `get_decision` da decisão de teste, `provenance.principal` é o seu nome.
 
 ## Divergências em relação a `MCP_TOOLS.md`

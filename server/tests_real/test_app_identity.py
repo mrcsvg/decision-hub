@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from types import SimpleNamespace
 
 import mcp.types as t
@@ -190,3 +191,54 @@ def test_sem_caractere_nulo_segue_para_a_ferramenta():
     assert _through(refuse_nul, {"query": "checkout", "limit": 3, "tags": None}) \
         == "chamou a ferramenta"
     assert nul_paths({"a": ["x", {"b": "y\x00"}]}) == ["a[1].b"]
+
+
+# ------------------------------------------------------- log de recusa de identidade
+
+
+def _rejections(caplog) -> list[dict]:
+    return [json.loads(r.getMessage()) for r in caplog.records
+            if r.name == "decision_memory" and "identity_rejected" in r.getMessage()]
+
+
+def test_recusa_de_identidade_gera_uma_linha_sem_email_nem_token(caplog):
+    caplog.set_level(logging.INFO, logger="decision_memory")
+    bearer = token({"email": "ana@x.com", "aud": "https://outro"})
+    assert email_from_headers({"authorization": bearer}, (AUD,)) is None
+    [line] = _rejections(caplog)
+    assert line == {"severity": "WARNING", "event": "identity_rejected", "reason": "bad_aud",
+                    "header": "authorization", "iss": "https://accounts.google.com",
+                    "aud": "https://outro"}
+    text = caplog.text
+    assert "ana@x.com" not in text and bearer[7:] not in text
+    assert all(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_motivos_da_recusa(caplog):
+    caplog.set_level(logging.INFO, logger="decision_memory")
+    casos = {
+        "no_bearer": "Basic xyz",
+        "unreadable": "Bearer lixo",
+        "bad_iss": token({"email": "a@b.c", "aud": AUD}, "https://evil"),
+        "bad_aud": token({"email": "a@b.c", "aud": ["https://x", "https://y"]}),
+        "unverified": token({"email": "a@b.c", "aud": AUD, "email_verified": False}),
+        "no_email": token({"aud": AUD}),
+    }
+    for reason, header in casos.items():
+        caplog.clear()
+        assert email_from_headers({"x-serverless-authorization": header}, (AUD,)) is None
+        [line] = _rejections(caplog)
+        assert (line["reason"], line["header"]) == (reason, "x-serverless-authorization")
+        assert "a@b.c" not in caplog.text
+    # O aud recusado vai como veio (lista), o iss também.
+    caplog.clear()
+    email_from_headers({"authorization": casos["bad_aud"]}, (AUD,))
+    assert _rejections(caplog)[0]["aud"] == ["https://x", "https://y"]
+
+
+def test_sem_header_ou_com_identidade_aceita_nao_ha_log(caplog):
+    caplog.set_level(logging.INFO, logger="decision_memory")
+    assert email_from_headers({}, (AUD,)) is None
+    assert email_from_headers({"authorization": token({"email": "a@b.c", "aud": AUD})},
+                              (AUD,)) == "a@b.c"
+    assert _rejections(caplog) == []

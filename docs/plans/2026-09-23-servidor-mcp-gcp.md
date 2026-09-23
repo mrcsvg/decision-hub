@@ -1045,6 +1045,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from types import SimpleNamespace
 
 import mcp.types as t
@@ -1233,6 +1234,57 @@ def test_sem_caractere_nulo_segue_para_a_ferramenta():
     assert _through(refuse_nul, {"query": "checkout", "limit": 3, "tags": None}) \
         == "chamou a ferramenta"
     assert nul_paths({"a": ["x", {"b": "y\x00"}]}) == ["a[1].b"]
+
+
+# ------------------------------------------------------- log de recusa de identidade
+
+
+def _rejections(caplog) -> list[dict]:
+    return [json.loads(r.getMessage()) for r in caplog.records
+            if r.name == "decision_memory" and "identity_rejected" in r.getMessage()]
+
+
+def test_recusa_de_identidade_gera_uma_linha_sem_email_nem_token(caplog):
+    caplog.set_level(logging.INFO, logger="decision_memory")
+    bearer = token({"email": "ana@x.com", "aud": "https://outro"})
+    assert email_from_headers({"authorization": bearer}, (AUD,)) is None
+    [line] = _rejections(caplog)
+    assert line == {"severity": "WARNING", "event": "identity_rejected", "reason": "bad_aud",
+                    "header": "authorization", "iss": "https://accounts.google.com",
+                    "aud": "https://outro"}
+    text = caplog.text
+    assert "ana@x.com" not in text and bearer[7:] not in text
+    assert all(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_motivos_da_recusa(caplog):
+    caplog.set_level(logging.INFO, logger="decision_memory")
+    casos = {
+        "no_bearer": "Basic xyz",
+        "unreadable": "Bearer lixo",
+        "bad_iss": token({"email": "a@b.c", "aud": AUD}, "https://evil"),
+        "bad_aud": token({"email": "a@b.c", "aud": ["https://x", "https://y"]}),
+        "unverified": token({"email": "a@b.c", "aud": AUD, "email_verified": False}),
+        "no_email": token({"aud": AUD}),
+    }
+    for reason, header in casos.items():
+        caplog.clear()
+        assert email_from_headers({"x-serverless-authorization": header}, (AUD,)) is None
+        [line] = _rejections(caplog)
+        assert (line["reason"], line["header"]) == (reason, "x-serverless-authorization")
+        assert "a@b.c" not in caplog.text
+    # O aud recusado vai como veio (lista), o iss também.
+    caplog.clear()
+    email_from_headers({"authorization": casos["bad_aud"]}, (AUD,))
+    assert _rejections(caplog)[0]["aud"] == ["https://x", "https://y"]
+
+
+def test_sem_header_ou_com_identidade_aceita_nao_ha_log(caplog):
+    caplog.set_level(logging.INFO, logger="decision_memory")
+    assert email_from_headers({}, (AUD,)) is None
+    assert email_from_headers({"authorization": token({"email": "a@b.c", "aud": AUD})},
+                              (AUD,)) == "a@b.c"
+    assert _rejections(caplog) == []
 ```
 
 **Passo 2: rodar e ver falhar.** `.venv/bin/python -m pytest server/tests_real/test_app_identity.py -q` → import falha.
@@ -1270,9 +1322,13 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+
+# O logger do pacote: o "mcp" fica em WARNING (app.build_app), este não.
+log = logging.getLogger("decision_memory")
 
 _email: ContextVar[str | None] = ContextVar("dm_principal_email", default=None)
 _client: ContextVar[str | None] = ContextVar("dm_client", default=None)
@@ -1303,46 +1359,81 @@ def _audience_ok(aud: object, audiences: tuple[str, ...]) -> bool:
     return False
 
 
+# Quanto do aud/iss recusado vai ao log: são valores de quem chama.
+MAX_LOGGED = 200
+
+
+def _check(header: str | None, audiences: tuple[str, ...]) -> tuple[str | None, str | None, dict]:
+    """(e-mail, motivo da recusa, claims). Sem header, nem e-mail nem motivo."""
+    if header is None:
+        return None, None, {}
+    if not header.lower().startswith("bearer "):
+        return None, "no_bearer", {}
+    parts = header[7:].strip().split(".")
+    if len(parts) < 2:
+        return None, "unreadable", {}
+    try:
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except (binascii.Error, ValueError):
+        return None, "unreadable", {}
+    if not isinstance(claims, dict):
+        return None, "unreadable", {}
+    if claims.get("iss") not in GOOGLE_ISSUERS:
+        return None, "bad_iss", claims
+    if not _audience_ok(claims.get("aud"), audiences):
+        return None, "bad_aud", claims
+    # Só False recusa: a claim falta em alguns tokens federados, e o header já
+    # foi verificado pela plataforma.
+    if claims.get("email_verified") is False:
+        return None, "unverified", claims
+    email = claims.get("email")
+    if not isinstance(email, str) or not email.strip():
+        return None, "no_email", claims
+    return email.strip().lower(), None, claims
+
+
 def email_from_authorization(header: str | None, audiences: tuple[str, ...]) -> str | None:
     """E-mail do ID token no header, ou None se não houver identidade aceitável.
 
     Sem `audiences` configurado, o público não é conferido; com ele, vale
     também GCLOUD_CLIENT_ID. O emissor tem de ser o Google sempre.
     """
-    if not header or not header.lower().startswith("bearer "):
+    return _check(header, audiences)[0]
+
+
+def _clip(value: object) -> object:
+    """aud/iss como vieram, cortados: texto, lista de textos ou só o nome do tipo."""
+    if value is None:
         return None
-    parts = header[7:].strip().split(".")
-    if len(parts) < 2:
-        return None
-    try:
-        payload = parts[1] + "=" * (-len(parts[1]) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(payload))
-    except (binascii.Error, ValueError):
-        return None
-    if not isinstance(claims, dict):
-        return None
-    if claims.get("iss") not in GOOGLE_ISSUERS:
-        return None
-    if not _audience_ok(claims.get("aud"), audiences):
-        return None
-    # Só False recusa: a claim falta em alguns tokens federados, e o header já
-    # foi verificado pela plataforma.
-    if claims.get("email_verified") is False:
-        return None
-    email = claims.get("email")
-    return email.strip().lower() if isinstance(email, str) and email.strip() else None
+    if isinstance(value, str):
+        return value[:MAX_LOGGED]
+    if isinstance(value, list):
+        return [v[:MAX_LOGGED] if isinstance(v, str) else type(v).__name__ for v in value[:5]]
+    return type(value).__name__
+
+
+def _log_rejection(reason: str, header_name: str, claims: dict) -> None:
+    """Uma linha JSON por recusa, para diagnosticar o deploy. Nunca o e-mail nem o
+    token: só o motivo, o header e os valores de aud e iss que não serviram."""
+    log.warning(json.dumps({"severity": "WARNING", "event": "identity_rejected",
+                            "reason": reason, "header": header_name,
+                            "iss": _clip(claims.get("iss")), "aud": _clip(claims.get("aud"))}))
 
 
 def email_from_headers(headers: Mapping[str, str], audiences: tuple[str, ...]) -> str | None:
     """E-mail do header que o Cloud Run verificou.
 
     Com X-Serverless-Authorization presente, só ele conta; o Authorization é
-    ignorado, porque nesse caso a plataforma não o conferiu.
+    ignorado, porque nesse caso a plataforma não o conferiu. Header presente e
+    recusado deixa uma linha `identity_rejected` no log; header ausente, não.
     """
-    serverless = headers.get("x-serverless-authorization")
-    if serverless is not None:
-        return email_from_authorization(serverless, audiences)
-    return email_from_authorization(headers.get("authorization"), audiences)
+    name = ("x-serverless-authorization" if headers.get("x-serverless-authorization") is not None
+            else "authorization")
+    email, reason, claims = _check(headers.get(name), audiences)
+    if reason is not None:
+        _log_rejection(reason, name, claims)
+    return email
 
 
 def current_email() -> str | None:
@@ -4499,8 +4590,11 @@ curl -s localhost:8080/mcp \
 1. A resposta traz "Checkout em página única" — leitura e conexão por socket funcionam.
 2. No Claude Code, peça para registrar uma decisão de teste. Deve voltar `state: proposed`.
    Se voltar "Não consegui identificar sua conta", o token não chegou ou foi recusado (`aud`
-   fora de `DM_EXPECTED_AUDIENCE` e do cliente do gcloud, ou `iss` que não é o Google). Se
-   voltar "Sua conta não está cadastrada", falta o e-mail em `person`.
+   fora de `DM_EXPECTED_AUDIENCE` e do cliente do gcloud, ou `iss` que não é o Google). Nos
+   logs do serviço, a linha `identity_rejected` diz o motivo (`no_bearer`, `unreadable`,
+   `bad_iss`, `bad_aud`, `unverified`, `no_email`), o header lido e o `aud`/`iss` recusados —
+   nunca o e-mail nem o token. Sem nenhuma linha dessas, o token nem chegou. Se voltar "Sua
+   conta não está cadastrada", falta o e-mail em `person`.
 3. Em `get_decision` da decisão de teste, `provenance.principal` é o seu nome.
 
 ## Divergências em relação a `MCP_TOOLS.md`
