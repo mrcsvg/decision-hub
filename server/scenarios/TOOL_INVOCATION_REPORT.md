@@ -18,6 +18,8 @@ colunas objetivas; a leitura da conversa dá as demais.
 
 - Taxa de `search_evidence` antes da prosa, braço A: __ / 10
 - Taxa de `search_evidence` antes da prosa, braço B: __ / 10
+- Cenários 11 e 12, braço B, com a ferramenta esperada (`get_topic_timeline`, `find_related`): __ / 2
+- Cenários 1 e 10, braço B, com `search_evidence` ainda como primeira chamada: __ / 2
 - Diferença atribuível à skill: __
 - Recusas de expectativa registradas: __
 

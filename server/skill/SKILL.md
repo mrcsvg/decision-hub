@@ -23,6 +23,15 @@ Se a busca trouxer evidência que **contradiz** o caminho proposto, traga essa
 evidência para o usuário antes de recomendar. Evidência contrária registrada é o
 que distingue memória de justificativa.
 
+## Antes de reverter ou retomar
+
+Quando a conversa for sobre voltar a um tema já decidido — reverter, retomar,
+"já mudamos de ideia sobre isso?" —, chame `get_topic_timeline` com o tema e
+conte a trajetória em ordem: o que se decidiu, o que a revisão mostrou, o que se
+aprendeu. Antes de propor mudar uma decisão específica, chame `find_related` com
+ela e diga ao usuário quais outras decisões se apoiam na mesma evidência,
+principalmente quando a evidência teve papel oposto nas duas.
+
 ## Quando a escolha fecha
 
 Quando uma decisão for fechada na conversa — "vamos com a opção B", "decidimos
