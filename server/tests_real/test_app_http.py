@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import threading
 
 import pytest
 from conftest import ANA
 from starlette.testclient import TestClient
 
-from decision_memory.app import build_http_app
+from decision_memory import __main__ as entry
+from decision_memory.app import build_app, build_http_app
+from decision_memory.config import Settings
 from decision_memory.guard import EXPECTATION_REFUSAL, NUL_REFUSAL
 from decision_memory.server import build_server
 
@@ -141,6 +144,17 @@ def test_x_serverless_ilegivel_nao_cai_para_authorization(client, admin_conn):
     assert decisions_titled(admin_conn, title) == 0
 
 
+def test_identidade_nao_vaza_para_a_chamada_seguinte(client, admin_conn):
+    ok = call(client, "propose_decision", proposal("Zeppelin antes do anônimo"),
+              authorization=bearer(ANA))
+    assert ok["isError"] is False, ok
+    title = "Zeppelin anônimo logo depois"
+    res = call(client, "propose_decision", proposal(title))
+    assert res["isError"] is True
+    assert "nada foi gravado" in text(res)
+    assert decisions_titled(admin_conn, title) == 0
+
+
 def test_escrita_sem_token_e_recusada(client, admin_conn):
     title = "Zeppelin anônimo"
     res = call(client, "propose_decision", proposal(title))
@@ -190,6 +204,9 @@ def test_caractere_nulo_e_recusado(client, admin_conn):
     assert res["isError"] is True
     assert NUL_REFUSAL in text(res)
     assert "title" in text(res)
+    # O título tem \x00, que o Postgres nem aceita como parâmetro: busca pelo padrão.
+    assert count(admin_conn,
+                 "SELECT count(*) FROM decision WHERE title LIKE 'Zeppelin com %%nulo'") == 0
 
 
 def _request_with_deadline(client, method, seconds=5.0):
@@ -203,12 +220,18 @@ def _request_with_deadline(client, method, seconds=5.0):
     return box.get("r")
 
 
-@pytest.mark.parametrize("method", ["GET", "DELETE"])
-def test_get_e_delete_respondem_405_sem_pendurar(client, method):
+@pytest.mark.parametrize("method", ["GET", "DELETE", "HEAD", "OPTIONS", "PUT", "PATCH"])
+def test_so_post_em_mcp_o_resto_e_405_sem_pendurar(client, method):
     # Sem sessão não há fluxo SSE do servidor nem sessão a encerrar. Antes, o GET
-    # abria um stream que nunca fechava.
+    # abria um stream que nunca fechava; os outros métodos só servem ao POST.
     r = _request_with_deadline(client, method)
     assert r is not None, f"{method} /mcp não respondeu em 5 s"
+    assert r.status_code == 405
+    assert r.headers["allow"] == "POST"
+
+
+def test_barra_final_tambem_e_so_post(client):
+    r = client.request("GET", "/mcp/", headers=HEADERS, follow_redirects=False)
     assert r.status_code == 405
     assert r.headers["allow"] == "POST"
 
@@ -230,3 +253,26 @@ def test_no_cloud_run_host_run_app_e_aceito(pool):
         r = post(c, "tools/list", {})
     assert r.status_code == 200, r.text
     assert len(r.json()["result"]["tools"]) == 6
+
+
+def test_build_app_fecha_o_pool_ao_desligar(app_url):
+    app = build_app(Settings(database_url=app_url, database_password=None,
+                             expected_audiences=(AUD,), on_cloud_run=False))
+    with TestClient(app, base_url="http://localhost:8080") as c:
+        assert not app.state.pool.closed
+        assert len(rpc(c, "tools/list", {})["tools"]) == 6
+    assert app.state.pool.closed
+
+
+def test_build_app_cala_o_log_do_sdk_abaixo_de_warning(app_url):
+    # O SDK registra em INFO o texto de erro das ferramentas.
+    app = build_app(Settings(database_url=app_url, database_password=None,
+                             expected_audiences=(), on_cloud_run=False))
+    app.state.pool.close()
+    assert logging.getLogger("mcp").level == logging.WARNING
+
+
+def test_no_cloud_run_uvicorn_confia_no_proxy():
+    assert entry.uvicorn_options({"K_SERVICE": "decision-memory", "PORT": "9000"}) == {
+        "host": "0.0.0.0", "port": 9000, "forwarded_allow_ips": "*"}
+    assert entry.uvicorn_options({}) == {"host": "0.0.0.0", "port": 8080}

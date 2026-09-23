@@ -136,7 +136,9 @@ def require_principal(conn) -> uuid.UUID:
                        (email,)).fetchone()
     if row is None:
         raise ToolError(
-            f"Sua conta {email} não está cadastrada no registro. Peça a quem administra "
+            # Sem o e-mail no texto: o SDK registra a mensagem de erro no log, e
+            # quem chama sabe com que conta entrou.
+            "Sua conta não está cadastrada no registro. Peça a quem administra "
             "para incluí-la; nada foi gravado."
         )
     return row["id"]

@@ -5,12 +5,16 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from decision_memory import seed
-from decision_memory.db import STATEMENT_TIMEOUT_MS, connection_kwargs
+from decision_memory.db import POOL_TIMEOUT_S, STATEMENT_TIMEOUT_MS, connection_kwargs
 
 
 def test_servidor_conecta_como_dm_app(pool):
     with pool.connection() as conn:
         assert conn.execute("SELECT current_user AS u").fetchone()["u"] == "dm_app"
+
+
+def test_pool_espera_conexao_no_maximo_o_teto_do_comando(pool):
+    assert pool.timeout == POOL_TIMEOUT_S == STATEMENT_TIMEOUT_MS / 1000
 
 
 def test_dm_app_nao_escreve_expectativa(pool):

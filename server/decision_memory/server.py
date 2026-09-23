@@ -108,7 +108,9 @@ def with_db(pool: ConnectionPool, work: Callable[[psycopg.Connection], T]) -> T:
         # detalhe (SQL, traceback) fica no log, achável pela ref.
         ref = uuid.uuid4().hex[:8]
         bug = not isinstance(exc, psycopg.OperationalError)
-        log.error(json.dumps({"event": "db_error" if isinstance(exc, psycopg.Error)
+        # `severity` é o campo que o Cloud Logging lê de uma linha JSON no stdout.
+        log.error(json.dumps({"severity": "ERROR",
+                              "event": "db_error" if isinstance(exc, psycopg.Error)
                               else "internal_error",
                               "ref": ref, "bug": bug, "type": type(exc).__name__,
                               "sqlstate": getattr(exc, "sqlstate", None),

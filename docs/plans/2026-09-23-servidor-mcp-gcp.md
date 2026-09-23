@@ -456,6 +456,10 @@ from psycopg_pool import ConnectionPool
 # milissegundos; 5 s só estoura com consulta patológica, e aí é melhor cancelar
 # do que prender uma das quatro conexões do pool.
 STATEMENT_TIMEOUT_MS = 5000
+# Espera máxima por uma conexão livre do pool. Mesmo teto do comando: com as
+# quatro ocupadas, quem espera mais do que um comando pode durar está numa fila
+# que não anda; melhor falhar com o erro genérico do que prender a requisição.
+POOL_TIMEOUT_S = STATEMENT_TIMEOUT_MS / 1000
 
 
 def connection_kwargs(password: str | None = None) -> dict:
@@ -477,7 +481,8 @@ def make_pool(url: str, password: str | None = None) -> ConnectionPool:
     # Cloud SQL e o Auth Proxy derrubam conexão ociosa: o pool testa a conexão
     # antes de entregá-la e descarta as que ficaram paradas mais de 5 minutos.
     return ConnectionPool(url, kwargs=kwargs, min_size=1, max_size=4, open=True,
-                          check=ConnectionPool.check_connection, max_idle=300)
+                          timeout=POOL_TIMEOUT_S, check=ConnectionPool.check_connection,
+                          max_idle=300)
 ```
 
 **Passo 5: harness de teste.** `server/tests_real/conftest.py`:
@@ -594,12 +599,16 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from decision_memory import seed
-from decision_memory.db import STATEMENT_TIMEOUT_MS, connection_kwargs
+from decision_memory.db import POOL_TIMEOUT_S, STATEMENT_TIMEOUT_MS, connection_kwargs
 
 
 def test_servidor_conecta_como_dm_app(pool):
     with pool.connection() as conn:
         assert conn.execute("SELECT current_user AS u").fetchone()["u"] == "dm_app"
+
+
+def test_pool_espera_conexao_no_maximo_o_teto_do_comando(pool):
+    assert pool.timeout == POOL_TIMEOUT_S == STATEMENT_TIMEOUT_MS / 1000
 
 
 def test_dm_app_nao_escreve_expectativa(pool):
@@ -2062,6 +2071,7 @@ def test_ordem_das_middlewares(pool):
 ```python
 from __future__ import annotations
 
+import json
 import time
 from contextlib import contextmanager
 
@@ -2335,8 +2345,10 @@ def test_erro_inesperado_vira_mensagem_generica(server, monkeypatch, caplog, err
     mensagem = str(excinfo.value)
     assert "ref" in mensagem and "segredo" not in mensagem
     ref = mensagem.split("ref ")[1].split(")")[0]
-    assert any(ref in r.getMessage() and type(erro).__name__ in r.getMessage()
-               for r in caplog.records)
+    entries = [json.loads(r.getMessage()) for r in caplog.records if ref in r.getMessage()]
+    assert entries and entries[0]["type"] == type(erro).__name__
+    # Cloud Logging lê a severidade do campo, não do nível do logger.
+    assert entries[0]["severity"] == "ERROR"
 
 
 def test_resumo_em_texto_corta_a_consulta(server):
@@ -2462,7 +2474,9 @@ def with_db(pool: ConnectionPool, work: Callable[[psycopg.Connection], T]) -> T:
         # detalhe (SQL, traceback) fica no log, achável pela ref.
         ref = uuid.uuid4().hex[:8]
         bug = not isinstance(exc, psycopg.OperationalError)
-        log.error(json.dumps({"event": "db_error" if isinstance(exc, psycopg.Error)
+        # `severity` é o campo que o Cloud Logging lê de uma linha JSON no stdout.
+        log.error(json.dumps({"severity": "ERROR",
+                              "event": "db_error" if isinstance(exc, psycopg.Error)
                               else "internal_error",
                               "ref": ref, "bug": bug, "type": type(exc).__name__,
                               "sqlstate": getattr(exc, "sqlstate", None),
@@ -2685,6 +2699,8 @@ def test_conta_nao_cadastrada_nao_escreve(server, admin_conn):
         call(server, "propose_decision", {**PROPOSTA, "title": title},
              as_email="estranha@exemplo.com")
     assert "não está cadastrada" in str(excinfo.value)
+    # O SDK registra o texto do erro; e-mail nele iria para o log.
+    assert "estranha@exemplo.com" not in str(excinfo.value)
     assert count(admin_conn, "SELECT count(*) FROM decision WHERE title = %s", title) == 0
 
 
@@ -3247,7 +3263,9 @@ def require_principal(conn) -> uuid.UUID:
                        (email,)).fetchone()
     if row is None:
         raise ToolError(
-            f"Sua conta {email} não está cadastrada no registro. Peça a quem administra "
+            # Sem o e-mail no texto: o SDK registra a mensagem de erro no log, e
+            # quem chama sabe com que conta entrou.
+            "Sua conta não está cadastrada no registro. Peça a quem administra "
             "para incluí-la; nada foi gravado."
         )
     return row["id"]
@@ -3719,13 +3737,16 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import threading
 
 import pytest
 from conftest import ANA
 from starlette.testclient import TestClient
 
-from decision_memory.app import build_http_app
+from decision_memory import __main__ as entry
+from decision_memory.app import build_app, build_http_app
+from decision_memory.config import Settings
 from decision_memory.guard import EXPECTATION_REFUSAL, NUL_REFUSAL
 from decision_memory.server import build_server
 
@@ -3850,6 +3871,17 @@ def test_x_serverless_ilegivel_nao_cai_para_authorization(client, admin_conn):
     assert decisions_titled(admin_conn, title) == 0
 
 
+def test_identidade_nao_vaza_para_a_chamada_seguinte(client, admin_conn):
+    ok = call(client, "propose_decision", proposal("Zeppelin antes do anônimo"),
+              authorization=bearer(ANA))
+    assert ok["isError"] is False, ok
+    title = "Zeppelin anônimo logo depois"
+    res = call(client, "propose_decision", proposal(title))
+    assert res["isError"] is True
+    assert "nada foi gravado" in text(res)
+    assert decisions_titled(admin_conn, title) == 0
+
+
 def test_escrita_sem_token_e_recusada(client, admin_conn):
     title = "Zeppelin anônimo"
     res = call(client, "propose_decision", proposal(title))
@@ -3899,6 +3931,9 @@ def test_caractere_nulo_e_recusado(client, admin_conn):
     assert res["isError"] is True
     assert NUL_REFUSAL in text(res)
     assert "title" in text(res)
+    # O título tem \x00, que o Postgres nem aceita como parâmetro: busca pelo padrão.
+    assert count(admin_conn,
+                 "SELECT count(*) FROM decision WHERE title LIKE 'Zeppelin com %%nulo'") == 0
 
 
 def _request_with_deadline(client, method, seconds=5.0):
@@ -3912,12 +3947,18 @@ def _request_with_deadline(client, method, seconds=5.0):
     return box.get("r")
 
 
-@pytest.mark.parametrize("method", ["GET", "DELETE"])
-def test_get_e_delete_respondem_405_sem_pendurar(client, method):
+@pytest.mark.parametrize("method", ["GET", "DELETE", "HEAD", "OPTIONS", "PUT", "PATCH"])
+def test_so_post_em_mcp_o_resto_e_405_sem_pendurar(client, method):
     # Sem sessão não há fluxo SSE do servidor nem sessão a encerrar. Antes, o GET
-    # abria um stream que nunca fechava.
+    # abria um stream que nunca fechava; os outros métodos só servem ao POST.
     r = _request_with_deadline(client, method)
     assert r is not None, f"{method} /mcp não respondeu em 5 s"
+    assert r.status_code == 405
+    assert r.headers["allow"] == "POST"
+
+
+def test_barra_final_tambem_e_so_post(client):
+    r = client.request("GET", "/mcp/", headers=HEADERS, follow_redirects=False)
     assert r.status_code == 405
     assert r.headers["allow"] == "POST"
 
@@ -3939,6 +3980,29 @@ def test_no_cloud_run_host_run_app_e_aceito(pool):
         r = post(c, "tools/list", {})
     assert r.status_code == 200, r.text
     assert len(r.json()["result"]["tools"]) == 6
+
+
+def test_build_app_fecha_o_pool_ao_desligar(app_url):
+    app = build_app(Settings(database_url=app_url, database_password=None,
+                             expected_audiences=(AUD,), on_cloud_run=False))
+    with TestClient(app, base_url="http://localhost:8080") as c:
+        assert not app.state.pool.closed
+        assert len(rpc(c, "tools/list", {})["tools"]) == 6
+    assert app.state.pool.closed
+
+
+def test_build_app_cala_o_log_do_sdk_abaixo_de_warning(app_url):
+    # O SDK registra em INFO o texto de erro das ferramentas.
+    app = build_app(Settings(database_url=app_url, database_password=None,
+                             expected_audiences=(), on_cloud_run=False))
+    app.state.pool.close()
+    assert logging.getLogger("mcp").level == logging.WARNING
+
+
+def test_no_cloud_run_uvicorn_confia_no_proxy():
+    assert entry.uvicorn_options({"K_SERVICE": "decision-memory", "PORT": "9000"}) == {
+        "host": "0.0.0.0", "port": 9000, "forwarded_allow_ips": "*"}
+    assert entry.uvicorn_options({}) == {"host": "0.0.0.0", "port": 8080}
 ```
 
 Se a resposta vier em SSE em vez de JSON, confira que `build_http_app` passa
@@ -3954,9 +4018,14 @@ Se a resposta vier em SSE em vez de JSON, confira que `build_http_app` passa
 from __future__ import annotations
 
 import logging
+import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any
 
 from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from psycopg_pool import ConnectionPool
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -3969,21 +4038,22 @@ MCP_PATH = "/mcp"
 
 
 class PostOnly:
-    """Responde 405 (`Allow: POST`) a GET e DELETE em /mcp; o resto segue intacto.
+    """Em /mcp (e /mcp/), só POST; qualquer outro método recebe 405 `Allow: POST`.
 
     Sem estado, não há sessão: nada que o servidor possa empurrar por um fluxo
-    SSE, nem sessão a encerrar. O SDK, porém, aceita o GET e abre um stream que
-    nunca fecha — no Cloud Run isso prende a instância, ocupada e cobrada, até
-    o timeout da requisição. A especificação do Streamable HTTP permite 405
-    quando o servidor não oferece esse fluxo. O DELETE o SDK já recusava com
-    405, mas sem o header Allow; passa por aqui para responder igual.
+    SSE (GET), nem sessão a encerrar (DELETE). O SDK, porém, aceita o GET e
+    abre um stream que nunca fecha — no Cloud Run isso prende a instância,
+    ocupada e cobrada, até o timeout da requisição. A especificação do
+    Streamable HTTP permite 405 quando o servidor não oferece esse fluxo. Os
+    demais métodos não fazem sentido no transporte; respondem igual, com o
+    header Allow que o 405 pede.
     """
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if (scope["type"] == "http" and scope["method"] in ("GET", "DELETE")
+        if (scope["type"] == "http" and scope["method"] != "POST"
                 and scope["path"].rstrip("/") == MCP_PATH):
             response = JSONResponse(
                 {"jsonrpc": "2.0", "id": None,
@@ -4013,13 +4083,35 @@ def build_http_app(server: MCPServer, *, on_cloud_run: bool) -> Starlette:
     return app
 
 
+def close_pool_on_shutdown(app: Starlette, pool: ConnectionPool) -> None:
+    """Compõe o lifespan do SDK (que sobe o gerenciador de sessões) com o fechamento
+    do pool, para as conexões saírem limpas quando o Cloud Run para a instância."""
+    sdk_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(a: Starlette) -> AsyncIterator[Any]:
+        try:
+            async with sdk_lifespan(a) as state:
+                yield state
+        finally:
+            pool.close()
+
+    app.router.lifespan_context = lifespan
+
+
 def build_app(settings: config.Settings | None = None) -> Starlette:
     # Uma linha por evento no stdout: o Cloud Logging captura sem configuração.
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+    # O SDK registra em INFO o texto dos erros de ferramenta, que pode trazer dado
+    # de quem chama; do SDK, só aviso e erro.
+    logging.getLogger("mcp").setLevel(logging.WARNING)
     settings = settings or config.load()
     pool = db.make_pool(settings.database_url, settings.database_password)
     server = build_server(pool, settings.expected_audiences)
-    return build_http_app(server, on_cloud_run=settings.on_cloud_run)
+    app = build_http_app(server, on_cloud_run=settings.on_cloud_run)
+    close_pool_on_shutdown(app, pool)
+    app.state.pool = pool
+    return app
 ```
 
 **Passo 4: `server/decision_memory/__main__.py`.**
@@ -4030,14 +4122,26 @@ def build_app(settings: config.Settings | None = None) -> Starlette:
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
+from typing import Any
 
 import uvicorn
 
 from .app import build_app
 
 
+def uvicorn_options(environ: Mapping[str, str]) -> dict[str, Any]:
+    options: dict[str, Any] = {"host": "0.0.0.0", "port": int(environ.get("PORT", "8080"))}
+    if "K_SERVICE" in environ:
+        # No Cloud Run só o front end do Google chega ao container, e é ele que
+        # põe X-Forwarded-Proto/For: confiar neles mantém https nos redirects
+        # (/mcp/ → /mcp) em vez de apontar para http.
+        options["forwarded_allow_ips"] = "*"
+    return options
+
+
 def main() -> None:
-    uvicorn.run(build_app(), host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
+    uvicorn.run(build_app(), **uvicorn_options(os.environ))
 
 
 if __name__ == "__main__":
@@ -4261,9 +4365,12 @@ gcloud secrets add-iam-policy-binding dm-app-password --project $PROJECT \
 #    o público vai já no primeiro deploy: a URL determinística do serviço.
 PROJECT_NUMBER=$(gcloud projects describe $PROJECT --format='value(projectNumber)')
 AUDIENCE=https://decision-memory-$PROJECT_NUMBER.$REGION.run.app
+#    --concurrency 8: o pool tem 4 conexões e espera no máximo 5 s por uma; com as 80
+#    requisições por instância do padrão, a fila estouraria o prazo antes de escalar.
 gcloud run deploy decision-memory --source server --project $PROJECT --region $REGION \
   --service-account $SA --no-allow-unauthenticated \
   --add-cloudsql-instances $INSTANCE --min-instances 0 --max-instances 2 \
+  --concurrency 8 \
   --set-env-vars "DM_DATABASE_URL=postgresql://dm_app@/decision_memory?host=/cloudsql/$INSTANCE,DM_EXPECTED_AUDIENCE=$AUDIENCE" \
   --set-secrets DM_DATABASE_PASSWORD=dm-app-password:latest
 #    Conferir com as URLs que o Cloud Run de fato atribuiu; se houver outras, aceitar todas.

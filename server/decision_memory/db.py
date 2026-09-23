@@ -10,6 +10,10 @@ from psycopg_pool import ConnectionPool
 # milissegundos; 5 s só estoura com consulta patológica, e aí é melhor cancelar
 # do que prender uma das quatro conexões do pool.
 STATEMENT_TIMEOUT_MS = 5000
+# Espera máxima por uma conexão livre do pool. Mesmo teto do comando: com as
+# quatro ocupadas, quem espera mais do que um comando pode durar está numa fila
+# que não anda; melhor falhar com o erro genérico do que prender a requisição.
+POOL_TIMEOUT_S = STATEMENT_TIMEOUT_MS / 1000
 
 
 def connection_kwargs(password: str | None = None) -> dict:
@@ -31,4 +35,5 @@ def make_pool(url: str, password: str | None = None) -> ConnectionPool:
     # Cloud SQL e o Auth Proxy derrubam conexão ociosa: o pool testa a conexão
     # antes de entregá-la e descarta as que ficaram paradas mais de 5 minutos.
     return ConnectionPool(url, kwargs=kwargs, min_size=1, max_size=4, open=True,
-                          check=ConnectionPool.check_connection, max_idle=300)
+                          timeout=POOL_TIMEOUT_S, check=ConnectionPool.check_connection,
+                          max_idle=300)

@@ -92,6 +92,8 @@ def test_conta_nao_cadastrada_nao_escreve(server, admin_conn):
         call(server, "propose_decision", {**PROPOSTA, "title": title},
              as_email="estranha@exemplo.com")
     assert "não está cadastrada" in str(excinfo.value)
+    # O SDK registra o texto do erro; e-mail nele iria para o log.
+    assert "estranha@exemplo.com" not in str(excinfo.value)
     assert count(admin_conn, "SELECT count(*) FROM decision WHERE title = %s", title) == 0
 
 

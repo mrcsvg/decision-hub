@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from contextlib import contextmanager
 
@@ -273,8 +274,10 @@ def test_erro_inesperado_vira_mensagem_generica(server, monkeypatch, caplog, err
     mensagem = str(excinfo.value)
     assert "ref" in mensagem and "segredo" not in mensagem
     ref = mensagem.split("ref ")[1].split(")")[0]
-    assert any(ref in r.getMessage() and type(erro).__name__ in r.getMessage()
-               for r in caplog.records)
+    entries = [json.loads(r.getMessage()) for r in caplog.records if ref in r.getMessage()]
+    assert entries and entries[0]["type"] == type(erro).__name__
+    # Cloud Logging lê a severidade do campo, não do nível do logger.
+    assert entries[0]["severity"] == "ERROR"
 
 
 def test_resumo_em_texto_corta_a_consulta(server):

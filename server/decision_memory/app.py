@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import logging
+import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any
 
 from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from psycopg_pool import ConnectionPool
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -18,21 +23,22 @@ MCP_PATH = "/mcp"
 
 
 class PostOnly:
-    """Responde 405 (`Allow: POST`) a GET e DELETE em /mcp; o resto segue intacto.
+    """Em /mcp (e /mcp/), só POST; qualquer outro método recebe 405 `Allow: POST`.
 
     Sem estado, não há sessão: nada que o servidor possa empurrar por um fluxo
-    SSE, nem sessão a encerrar. O SDK, porém, aceita o GET e abre um stream que
-    nunca fecha — no Cloud Run isso prende a instância, ocupada e cobrada, até
-    o timeout da requisição. A especificação do Streamable HTTP permite 405
-    quando o servidor não oferece esse fluxo. O DELETE o SDK já recusava com
-    405, mas sem o header Allow; passa por aqui para responder igual.
+    SSE (GET), nem sessão a encerrar (DELETE). O SDK, porém, aceita o GET e
+    abre um stream que nunca fecha — no Cloud Run isso prende a instância,
+    ocupada e cobrada, até o timeout da requisição. A especificação do
+    Streamable HTTP permite 405 quando o servidor não oferece esse fluxo. Os
+    demais métodos não fazem sentido no transporte; respondem igual, com o
+    header Allow que o 405 pede.
     """
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if (scope["type"] == "http" and scope["method"] in ("GET", "DELETE")
+        if (scope["type"] == "http" and scope["method"] != "POST"
                 and scope["path"].rstrip("/") == MCP_PATH):
             response = JSONResponse(
                 {"jsonrpc": "2.0", "id": None,
@@ -62,10 +68,32 @@ def build_http_app(server: MCPServer, *, on_cloud_run: bool) -> Starlette:
     return app
 
 
+def close_pool_on_shutdown(app: Starlette, pool: ConnectionPool) -> None:
+    """Compõe o lifespan do SDK (que sobe o gerenciador de sessões) com o fechamento
+    do pool, para as conexões saírem limpas quando o Cloud Run para a instância."""
+    sdk_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(a: Starlette) -> AsyncIterator[Any]:
+        try:
+            async with sdk_lifespan(a) as state:
+                yield state
+        finally:
+            pool.close()
+
+    app.router.lifespan_context = lifespan
+
+
 def build_app(settings: config.Settings | None = None) -> Starlette:
     # Uma linha por evento no stdout: o Cloud Logging captura sem configuração.
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+    # O SDK registra em INFO o texto dos erros de ferramenta, que pode trazer dado
+    # de quem chama; do SDK, só aviso e erro.
+    logging.getLogger("mcp").setLevel(logging.WARNING)
     settings = settings or config.load()
     pool = db.make_pool(settings.database_url, settings.database_password)
     server = build_server(pool, settings.expected_audiences)
-    return build_http_app(server, on_cloud_run=settings.on_cloud_run)
+    app = build_http_app(server, on_cloud_run=settings.on_cloud_run)
+    close_pool_on_shutdown(app, pool)
+    app.state.pool = pool
+    return app
