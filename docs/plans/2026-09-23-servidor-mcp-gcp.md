@@ -56,7 +56,7 @@ Fatos verificados antes de escrever este plano (não reverificar):
 **Passo 1: teste da invariante.** Em `db/test_invariants.sql`, antes de `\echo 'Todas as invariantes passaram.'`:
 
 ```sql
--- 8. Chave de idempotência é única por pessoa -------------------------------------
+-- 8. Chave de idempotência: única por pessoa, não vazia, só de decisão -------
 INSERT INTO idempotency_key (principal_person_id, key, object_type, object_id)
 VALUES ('00000000-0000-0000-0000-000000000001', 'k1', 'decision',
         '00000000-0000-0000-0000-0000000000d1');
@@ -67,6 +67,22 @@ DO $$ BEGIN
             '00000000-0000-0000-0000-0000000000d1');
     RAISE EXCEPTION 'FALHOU: chave de idempotência repetida foi aceita';
 EXCEPTION WHEN unique_violation THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    INSERT INTO idempotency_key (principal_person_id, key, object_type, object_id)
+    VALUES ('00000000-0000-0000-0000-000000000001', '', 'decision',
+            '00000000-0000-0000-0000-0000000000d1');
+    RAISE EXCEPTION 'FALHOU: chave de idempotência vazia foi aceita';
+EXCEPTION WHEN check_violation THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    INSERT INTO idempotency_key (principal_person_id, key, object_type, object_id)
+    VALUES ('00000000-0000-0000-0000-000000000001', 'k2', 'learning',
+            '00000000-0000-0000-0000-0000000000d1');
+    RAISE EXCEPTION 'FALHOU: chave de idempotência para objeto que não é decisão foi aceita';
+EXCEPTION WHEN check_violation THEN NULL;
 END $$;
 ```
 
