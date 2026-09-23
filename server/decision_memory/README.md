@@ -92,8 +92,11 @@ PYTHONPATH=server .venv/bin/python -m decision_memory.seed --database-url "$ADMI
   --attested-by voce@exemplo.com --people pessoas.csv
 
 # 2b. Opcional, para demonstração: cargos, áreas, vínculos, indicadores e medições
-#     fictícios, ligados às fixtures (as cinco tabelas que o corpus não cobre).
-psql "$ADMIN" -v ON_ERROR_STOP=1 -f db/demo.sql
+#     (demo.sql) e um corpus ampliado com mais pessoas, projetos, decisões em todos
+#     os estados, revisões com veredito e registros do agente (demo_corpus.sql).
+#     Fictícios, como as fixtures.
+psql "$ADMIN" -v ON_ERROR_STOP=1 -f db/demo.sql -f db/demo_corpus.sql
+#     Consultas prontas para mostrar as tabelas: psql "$ADMIN" -f db/demo_queries.sql
 
 # 3. Segredo e conta de serviço
 printf '%s' "$APP_PASSWORD" | gcloud secrets create dm-app-password --data-file=- --project $PROJECT
