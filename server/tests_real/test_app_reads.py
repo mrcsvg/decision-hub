@@ -285,3 +285,27 @@ def test_resumo_em_texto_corta_a_consulta(server):
     res = call(server, "search_evidence", {"query": consulta})
     assert res.structured_content["data"]["query"] == consulta
     assert "x" * 121 not in res.content[0].text
+
+
+def test_include_desconhecido_e_recusado_com_os_valores_aceitos(server):
+    with pytest.raises(ToolError) as excinfo:
+        call(server, "search_evidence", {"query": "checkout", "include": ["evidence", "lesson"]})
+    texto = str(excinfo.value)
+    assert "lesson" in texto
+    assert all(v in texto for v in ("evidence", "learning", "decision"))
+
+
+def test_filtro_de_projeto_trata_curinga_como_texto(server):
+    def reviews(project):
+        return call(server, "list_pending_reviews",
+                    {"project": project}).structured_content["data"]["reviews"]
+
+    assert reviews("checkout")  # o filtro funciona
+    for curinga in ("%", "_", "\\", "Checkout_2026", "%2026"):
+        assert reviews(curinga) == [], curinga
+
+
+def test_filtro_por_tag_usa_a_mesma_normalizacao_da_escrita(server, evidencia_com_tag_composta):
+    # Repetida, com acento, caixa e espaço: a mesma dobra de writes.fold_tags.
+    args = {"query": "", "tags": ["Página-Única", "pagina-unica ", "  "]}
+    assert _ids(server, args) == [evidencia_com_tag_composta]

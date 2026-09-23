@@ -28,7 +28,10 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
+from mcp.server.mcpserver.exceptions import ToolError
 from psycopg.types.json import Jsonb
+
+from .writes import normalize_tags
 
 NAMESPACE = uuid.UUID("7f1b0c3e-5d2a-4e8b-9c61-2a4f3e9d8b10")
 DEFAULT_FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -80,7 +83,14 @@ def _provenance(cur, object_type: str, object_id: uuid.UUID, fixture_id: str,
     )
 
 
-def _tags(cur, link_table: str, fk: str, object_id: uuid.UUID, names: list[str]) -> None:
+def _tags(cur, link_table: str, fk: str, object_id: uuid.UUID, fixture_id: str,
+          names: list[str]) -> None:
+    """Tags normalizadas como na escrita por agente (writes.normalize_tags): a
+    mesma dobra, e fora do padrão do contrato é erro, que desfaz a carga."""
+    try:
+        names = normalize_tags(names)
+    except ToolError as exc:
+        raise ValueError(f"{fixture_id}: {exc}") from None
     for name in names:
         cur.execute("INSERT INTO tag (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (name,))
         cur.execute(
@@ -130,7 +140,7 @@ def load(conn: psycopg.Connection, fixtures: Path = DEFAULT_FIXTURES, *,
                  e.get("source_system"), e.get("external_id"), e.get("strength"),
                  e.get("conformance_level"), Jsonb(e["record"]) if e.get("record") else None),
             )
-            _tags(cur, "evidence_tag", "evidence_id", fid(e["id"]), e.get("tags", []))
+            _tags(cur, "evidence_tag", "evidence_id", fid(e["id"]), e["id"], e.get("tags", []))
             _provenance(cur, "evidence", fid(e["id"]), e["id"], attester)
 
         decisions = _read(fixtures, "decisions")
@@ -160,7 +170,7 @@ def load(conn: psycopg.Connection, fixtures: Path = DEFAULT_FIXTURES, *,
                     (did, fid(link["evidence_id"]), link["role"], link.get("weight"),
                      link.get("note")),
                 )
-            _tags(cur, "decision_tag", "decision_id", did, d.get("tags", []))
+            _tags(cur, "decision_tag", "decision_id", did, d["id"], d.get("tags", []))
             _provenance(cur, "decision", did, d["id"],
                         attester if d["state"] == "attested" else None)
 
@@ -204,7 +214,7 @@ def load(conn: psycopg.Connection, fixtures: Path = DEFAULT_FIXTURES, *,
                     "ON CONFLICT DO NOTHING",
                     (fid(ev), lid),
                 )
-            _tags(cur, "learning_tag", "learning_id", lid, ln.get("tags", []))
+            _tags(cur, "learning_tag", "learning_id", lid, ln["id"], ln.get("tags", []))
             _provenance(cur, "learning", lid, ln["id"],
                         attester if ln["state"] == "attested" else None)
 

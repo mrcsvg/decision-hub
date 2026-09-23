@@ -511,3 +511,13 @@ def test_padrao_de_tag_e_o_do_contrato():
 
     walk(schema)
     assert patterns == {writes.TAG_PATTERN}
+
+
+def test_user_agent_longo_e_cortado_na_procedencia(server, admin_conn):
+    with acting_as(ANA, "cliente/" + "x" * 500):
+        res = run(server.call_tool("propose_decision",
+                                   {**PROPOSTA, "title": "Decisão zeppelin de cliente prolixo"}))
+    did = res.structured_content["data"]["decision_id"]
+    ref = admin_conn.execute("SELECT source_ref FROM provenance WHERE object_type = 'decision' "
+                             "AND object_id = %s", (did,)).fetchone()[0]
+    assert ref == "mcp; client=cliente/" + "x" * (writes.MAX_CLIENT - len("cliente/"))

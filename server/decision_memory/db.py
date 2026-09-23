@@ -37,3 +37,14 @@ def make_pool(url: str, password: str | None = None) -> ConnectionPool:
     return ConnectionPool(url, kwargs=kwargs, min_size=1, max_size=4, open=True,
                           timeout=POOL_TIMEOUT_S, check=ConnectionPool.check_connection,
                           max_idle=300)
+
+
+def evidence_attested(id_sql: str) -> str:
+    """Condição SQL: a evidência `id_sql` está atestada.
+
+    Evidência não tem coluna de estado: está atestada quando alguma procedência
+    dela tem attested_at (ADR 0005). A regra mora só aqui; busca, pendências e
+    escrita a usam.
+    """
+    return ("EXISTS (SELECT 1 FROM provenance p WHERE p.object_type = 'evidence' "
+            f"AND p.object_id = {id_sql} AND p.attested_at IS NOT NULL)")

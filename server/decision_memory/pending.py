@@ -10,19 +10,16 @@ from __future__ import annotations
 from typing import Any
 
 from .config import today
+from .db import evidence_attested
 from .models import Pending, ReviewDue
 
 MAX_REVIEWS_DUE = 3
 
-# Evidência não tem coluna de estado: está atestada quando alguma procedência
-# dela tem attested_at (ADR 0005).
-UNATTESTED_COUNT_SQL = """
+# Evidência não tem coluna de estado: a regra do ADR 0005 está em db.py.
+UNATTESTED_COUNT_SQL = f"""
 SELECT (SELECT count(*) FROM decision WHERE state = 'proposed')
      + (SELECT count(*) FROM learning WHERE state = 'proposed')
-     + (SELECT count(*) FROM evidence e
-         WHERE NOT EXISTS (SELECT 1 FROM provenance p
-                            WHERE p.object_type = 'evidence' AND p.object_id = e.id
-                              AND p.attested_at IS NOT NULL)) AS n
+     + (SELECT count(*) FROM evidence e WHERE NOT {evidence_attested('e.id')}) AS n
 """
 
 # Só revisões já vencidas: as que ainda não venceram não são cobrança, são ruído.

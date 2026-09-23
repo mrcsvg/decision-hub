@@ -17,6 +17,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from . import identity
 from .config import today
+from .db import evidence_attested
 from .guard import fold
 
 EVIDENCE_KINDS = ("experiment", "study", "analysis", "document", "external")
@@ -39,6 +40,8 @@ AUTHOR_KIND = "agent"
 # sem estado. Não inventamos: 'unknown', e o cliente (User-Agent) vai para
 # source_ref. Ver README, "Divergências".
 UNKNOWN_MODEL = "unknown"
+# O User-Agent vem de quem chama e não tem teto; em source_ref, até isso.
+MAX_CLIENT = 200
 
 DECIDER_NOT_FOUND = (
     "Pessoa não encontrada. Confirme o e-mail com o usuário; o registro não foi criado."
@@ -149,23 +152,31 @@ def _provenance(conn, object_type: str, object_id: uuid.UUID, principal: uuid.UU
         "INSERT INTO provenance (object_type, object_id, author_kind, principal_person_id, "
         "model, source_ref) VALUES (%s, %s, %s, %s, %s, %s)",
         (object_type, object_id, AUTHOR_KIND, principal, UNKNOWN_MODEL,
-         f"mcp; client={identity.current_client() or 'desconhecido'}"),
+         f"mcp; client={(identity.current_client() or 'desconhecido')[:MAX_CLIENT]}"),
     )
 
 
-def normalize_tags(tags: list[str] | None) -> list[str]:
+def fold_tags(tags: list[str] | None) -> list[str]:
     """Minúsculas, sem acento e sem espaço nas pontas; vazias somem, repetidas também.
 
-    O que sobra tem de casar com TAG_PATTERN, o padrão do contrato — o que
-    também satisfaz o CHECK de tag (name = lower(name) AND name <> ''). Fora
-    dele (tab, caractere invisível, emoji, '#'), recusa dizendo qual tag.
+    Serve à escrita (por normalize_tags) e ao filtro de tag da busca, para que
+    as duas pontas dobrem a tag do mesmo jeito.
     """
-    names = {fold(tag).strip() for tag in tags or []} - {""}
-    for name in sorted(names):
+    return sorted({fold(tag).strip() for tag in tags or []} - {""})
+
+
+def normalize_tags(tags: list[str] | None) -> list[str]:
+    """fold_tags, e o que sobra tem de casar com TAG_PATTERN, o padrão do contrato.
+
+    Isso também satisfaz o CHECK de tag (name = lower(name) AND name <> ''). Fora
+    do padrão (tab, caractere invisível, emoji, '#'), recusa dizendo qual tag.
+    """
+    names = fold_tags(tags)
+    for name in names:
         if not _TAG_RE.fullmatch(name):
             raise ToolError(f"Tag fora do padrão {TAG_PATTERN}: {name!r}. Use letras "
                             "minúsculas, dígitos, espaço e _ . / -; nada foi gravado.")
-    return sorted(names)
+    return names
 
 
 def _tags(conn, link_table: str, fk: str, object_id: uuid.UUID, tags: list[str] | None) -> None:
@@ -414,8 +425,7 @@ def attach_evidence(conn, *, decision_id: str, role: str, evidence_id: str | Non
 
     final_role, already = _link(conn, did, eid, role, weight, note)
     row = conn.execute(
-        "SELECT CASE WHEN EXISTS (SELECT 1 FROM provenance WHERE object_type = 'evidence' "
-        "AND object_id = %s AND attested_at IS NOT NULL) THEN 'attested' ELSE 'proposed' END "
+        f"SELECT CASE WHEN {evidence_attested('%s')} THEN 'attested' ELSE 'proposed' END "
         "AS state, EXISTS (SELECT 1 FROM decision_evidence WHERE decision_id = %s "
         "AND role = 'contradicts') AS contested", (eid, did)).fetchone()
     # Só cobra a evidência contrária quando este vínculo é novo, favorável, e a

@@ -83,3 +83,30 @@ def test_csv_de_pessoas_normaliza_e_recusa_linha_vazia(tmp_path):
     ruim.write_text("name,email\nEva Lima,eva@exemplo.com\nSem Email,\n", encoding="utf-8")
     with pytest.raises(ValueError, match="linha 3"):
         seed.read_people(ruim)
+
+
+def _fixtures_com_tag(tmp_path, tag):
+    """Cópia das fixtures com uma tag a mais na primeira evidência (mesmo id)."""
+    fixtures = tmp_path / "fixtures"
+    shutil.copytree(FIXTURES, fixtures)
+    evidence = json.loads((fixtures / "evidence.json").read_text(encoding="utf-8"))
+    evidence[0]["tags"] = [*evidence[0].get("tags", []), tag]
+    (fixtures / "evidence.json").write_text(json.dumps(evidence), encoding="utf-8")
+    return fixtures, evidence[0]
+
+
+def test_tags_das_fixtures_sao_normalizadas(admin_conn, tmp_path):
+    # " CheckOut " crua violaria o CHECK de tag; dobrada, é a tag que já existe.
+    fixtures, ev = _fixtures_com_tag(tmp_path, " CheckOut ")
+    assert "checkout" in ev["tags"]
+    antes = _counts(admin_conn)
+    seed.load(admin_conn, fixtures, attested_by_email="ana@exemplo.com.br")
+    assert _counts(admin_conn) == antes
+
+
+def test_tag_fora_do_padrao_levanta_value_error(admin_conn, tmp_path):
+    fixtures, ev = _fixtures_com_tag(tmp_path, "#growth")
+    antes = _counts(admin_conn)
+    with pytest.raises(ValueError, match=f"{ev['id']}.*#growth"):
+        seed.load(admin_conn, fixtures, attested_by_email="ana@exemplo.com.br")
+    assert _counts(admin_conn) == antes

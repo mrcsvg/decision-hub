@@ -9,7 +9,9 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from . import models
 from .config import today
+from .db import evidence_attested
 from .guard import fold
+from .writes import fold_tags
 
 STOPWORDS = frozenset(
     """
@@ -18,11 +20,9 @@ STOPWORDS = frozenset(
     """.split()
 )
 
-EVIDENCE_STATE = """
-CASE WHEN EXISTS (SELECT 1 FROM provenance p WHERE p.object_type = 'evidence'
-                   AND p.object_id = e.id AND p.attested_at IS NOT NULL)
-     THEN 'attested' ELSE 'proposed' END
-"""
+EVIDENCE_STATE = f"CASE WHEN {evidence_attested('e.id')} THEN 'attested' ELSE 'proposed' END"
+
+INCLUDE = ("evidence", "learning", "decision")
 
 # O dicionário 'simple' guarda o acento, e a coluna `search` do schema também:
 # "confirmacao" não casaria com "confirmação". Tirar o acento no próprio schema
@@ -142,15 +142,19 @@ def relevance(n_terms: int, hits: int, tag_hits: int) -> float:
 def search(conn, query: str, tags: list[str] | None, kinds: list[str] | None,
            source_system: str | None, include: list[str] | None,
            limit: int) -> tuple[list[models.SearchItem], int]:
-    include = include or ["evidence", "learning", "decision"]
+    unknown = sorted(set(include or []) - set(INCLUDE))
+    if unknown:
+        raise ToolError(f"include aceita só {', '.join(INCLUDE)}; recebeu {', '.join(unknown)}.")
+    include = include or list(INCLUDE)
     if kinds or source_system:
         # Tipo e origem são atributos de evidência; pedir por eles restringe a busca.
         include = ["evidence"]
     limit = max(1, min(int(limit), 50))
-    # O filtro por tag é pelo nome exato, dobrado; como no stub, as palavras da
-    # tag também entram como termos, passando por `terms()`: tag crua em
-    # to_tsquery seria erro de sintaxe com "(" ou "&".
-    wanted_tags = [name for name in (fold(tag).strip() for tag in (tags or [])) if name]
+    # O filtro por tag é pelo nome exato, dobrado como na escrita (fold_tags);
+    # tag fora do padrão não é recusada, só não casa com nada. Como no stub, as
+    # palavras da tag também entram como termos, passando por `terms()`: tag
+    # crua em to_tsquery seria erro de sintaxe com "(" ou "&".
+    wanted_tags = fold_tags(tags)
     words = terms(query)
     for tag in wanted_tags:
         words += [w for w in terms(tag) if w not in words]
@@ -304,6 +308,14 @@ def get_decision(conn, id: str | None, slug: str | None) -> models.DecisionData:
     )
 
 
+def _like_literal(text: str | None) -> str | None:
+    """`text` para ILIKE ... ESCAPE '\\' casando como texto: % e _ de quem chama
+    não viram curinga."""
+    if text is None:
+        return None
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def pending_reviews(conn, owner_email: str | None, project: str | None, overdue_only: bool,
                     include_unattested: bool) -> models.PendingReviewsData:
     reference = today()
@@ -317,10 +329,11 @@ def pending_reviews(conn, owner_email: str | None, project: str | None, overdue_
           LEFT JOIN project pr ON pr.id = d.project_id
          WHERE r.done_on IS NULL
            AND (%(owner)s::text IS NULL OR lower(p.email) = lower(%(owner)s))
-           AND (%(project)s::text IS NULL OR pr.name ILIKE '%%' || %(project)s || '%%')
+           AND (%(project)s::text IS NULL
+                OR pr.name ILIKE '%%' || %(project)s || '%%' ESCAPE '\\')
          ORDER BY r.due_on, d.id, r.id
         """,
-        {"owner": owner_email, "project": project},
+        {"owner": owner_email, "project": _like_literal(project)},
     ).fetchall()
     reviews = []
     for r in rows:

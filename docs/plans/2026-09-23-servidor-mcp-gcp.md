@@ -484,6 +484,17 @@ def make_pool(url: str, password: str | None = None) -> ConnectionPool:
     return ConnectionPool(url, kwargs=kwargs, min_size=1, max_size=4, open=True,
                           timeout=POOL_TIMEOUT_S, check=ConnectionPool.check_connection,
                           max_idle=300)
+
+
+def evidence_attested(id_sql: str) -> str:
+    """Condição SQL: a evidência `id_sql` está atestada.
+
+    Evidência não tem coluna de estado: está atestada quando alguma procedência
+    dela tem attested_at (ADR 0005). A regra mora só aqui; busca, pendências e
+    escrita a usam.
+    """
+    return ("EXISTS (SELECT 1 FROM provenance p WHERE p.object_type = 'evidence' "
+            f"AND p.object_id = {id_sql} AND p.attested_at IS NOT NULL)")
 ```
 
 **Passo 5: harness de teste.** `server/tests_real/conftest.py`:
@@ -792,6 +803,33 @@ def test_csv_de_pessoas_normaliza_e_recusa_linha_vazia(tmp_path):
     ruim.write_text("name,email\nEva Lima,eva@exemplo.com\nSem Email,\n", encoding="utf-8")
     with pytest.raises(ValueError, match="linha 3"):
         seed.read_people(ruim)
+
+
+def _fixtures_com_tag(tmp_path, tag):
+    """Cópia das fixtures com uma tag a mais na primeira evidência (mesmo id)."""
+    fixtures = tmp_path / "fixtures"
+    shutil.copytree(FIXTURES, fixtures)
+    evidence = json.loads((fixtures / "evidence.json").read_text(encoding="utf-8"))
+    evidence[0]["tags"] = [*evidence[0].get("tags", []), tag]
+    (fixtures / "evidence.json").write_text(json.dumps(evidence), encoding="utf-8")
+    return fixtures, evidence[0]
+
+
+def test_tags_das_fixtures_sao_normalizadas(admin_conn, tmp_path):
+    # " CheckOut " crua violaria o CHECK de tag; dobrada, é a tag que já existe.
+    fixtures, ev = _fixtures_com_tag(tmp_path, " CheckOut ")
+    assert "checkout" in ev["tags"]
+    antes = _counts(admin_conn)
+    seed.load(admin_conn, fixtures, attested_by_email="ana@exemplo.com.br")
+    assert _counts(admin_conn) == antes
+
+
+def test_tag_fora_do_padrao_levanta_value_error(admin_conn, tmp_path):
+    fixtures, ev = _fixtures_com_tag(tmp_path, "#growth")
+    antes = _counts(admin_conn)
+    with pytest.raises(ValueError, match=f"{ev['id']}.*#growth"):
+        seed.load(admin_conn, fixtures, attested_by_email="ana@exemplo.com.br")
+    assert _counts(admin_conn) == antes
 ```
 
 `admin_conn` é autocommit e devolve tuplas (sem `dict_row`), por isso os índices numéricos.
@@ -831,7 +869,10 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
+from mcp.server.mcpserver.exceptions import ToolError
 from psycopg.types.json import Jsonb
+
+from .writes import normalize_tags
 
 NAMESPACE = uuid.UUID("7f1b0c3e-5d2a-4e8b-9c61-2a4f3e9d8b10")
 DEFAULT_FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -883,7 +924,14 @@ def _provenance(cur, object_type: str, object_id: uuid.UUID, fixture_id: str,
     )
 
 
-def _tags(cur, link_table: str, fk: str, object_id: uuid.UUID, names: list[str]) -> None:
+def _tags(cur, link_table: str, fk: str, object_id: uuid.UUID, fixture_id: str,
+          names: list[str]) -> None:
+    """Tags normalizadas como na escrita por agente (writes.normalize_tags): a
+    mesma dobra, e fora do padrão do contrato é erro, que desfaz a carga."""
+    try:
+        names = normalize_tags(names)
+    except ToolError as exc:
+        raise ValueError(f"{fixture_id}: {exc}") from None
     for name in names:
         cur.execute("INSERT INTO tag (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (name,))
         cur.execute(
@@ -933,7 +981,7 @@ def load(conn: psycopg.Connection, fixtures: Path = DEFAULT_FIXTURES, *,
                  e.get("source_system"), e.get("external_id"), e.get("strength"),
                  e.get("conformance_level"), Jsonb(e["record"]) if e.get("record") else None),
             )
-            _tags(cur, "evidence_tag", "evidence_id", fid(e["id"]), e.get("tags", []))
+            _tags(cur, "evidence_tag", "evidence_id", fid(e["id"]), e["id"], e.get("tags", []))
             _provenance(cur, "evidence", fid(e["id"]), e["id"], attester)
 
         decisions = _read(fixtures, "decisions")
@@ -963,7 +1011,7 @@ def load(conn: psycopg.Connection, fixtures: Path = DEFAULT_FIXTURES, *,
                     (did, fid(link["evidence_id"]), link["role"], link.get("weight"),
                      link.get("note")),
                 )
-            _tags(cur, "decision_tag", "decision_id", did, d.get("tags", []))
+            _tags(cur, "decision_tag", "decision_id", did, d["id"], d.get("tags", []))
             _provenance(cur, "decision", did, d["id"],
                         attester if d["state"] == "attested" else None)
 
@@ -1007,7 +1055,7 @@ def load(conn: psycopg.Connection, fixtures: Path = DEFAULT_FIXTURES, *,
                     "ON CONFLICT DO NOTHING",
                     (fid(ev), lid),
                 )
-            _tags(cur, "learning_tag", "learning_id", lid, ln.get("tags", []))
+            _tags(cur, "learning_tag", "learning_id", lid, ln["id"], ln.get("tags", []))
             _provenance(cur, "learning", lid, ln["id"],
                         attester if ln["state"] == "attested" else None)
 
@@ -1707,19 +1755,16 @@ from __future__ import annotations
 from typing import Any
 
 from .config import today
+from .db import evidence_attested
 from .models import Pending, ReviewDue
 
 MAX_REVIEWS_DUE = 3
 
-# Evidência não tem coluna de estado: está atestada quando alguma procedência
-# dela tem attested_at (ADR 0005).
-UNATTESTED_COUNT_SQL = """
+# Evidência não tem coluna de estado: a regra do ADR 0005 está em db.py.
+UNATTESTED_COUNT_SQL = f"""
 SELECT (SELECT count(*) FROM decision WHERE state = 'proposed')
      + (SELECT count(*) FROM learning WHERE state = 'proposed')
-     + (SELECT count(*) FROM evidence e
-         WHERE NOT EXISTS (SELECT 1 FROM provenance p
-                            WHERE p.object_type = 'evidence' AND p.object_id = e.id
-                              AND p.attested_at IS NOT NULL)) AS n
+     + (SELECT count(*) FROM evidence e WHERE NOT {evidence_attested('e.id')}) AS n
 """
 
 # Só revisões já vencidas: as que ainda não venceram não são cobrança, são ruído.
@@ -1825,7 +1870,9 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from . import models
 from .config import today
+from .db import evidence_attested
 from .guard import fold
+from .writes import fold_tags
 
 STOPWORDS = frozenset(
     """
@@ -1834,11 +1881,9 @@ STOPWORDS = frozenset(
     """.split()
 )
 
-EVIDENCE_STATE = """
-CASE WHEN EXISTS (SELECT 1 FROM provenance p WHERE p.object_type = 'evidence'
-                   AND p.object_id = e.id AND p.attested_at IS NOT NULL)
-     THEN 'attested' ELSE 'proposed' END
-"""
+EVIDENCE_STATE = f"CASE WHEN {evidence_attested('e.id')} THEN 'attested' ELSE 'proposed' END"
+
+INCLUDE = ("evidence", "learning", "decision")
 
 # O dicionário 'simple' guarda o acento, e a coluna `search` do schema também:
 # "confirmacao" não casaria com "confirmação". Tirar o acento no próprio schema
@@ -1958,15 +2003,19 @@ def relevance(n_terms: int, hits: int, tag_hits: int) -> float:
 def search(conn, query: str, tags: list[str] | None, kinds: list[str] | None,
            source_system: str | None, include: list[str] | None,
            limit: int) -> tuple[list[models.SearchItem], int]:
-    include = include or ["evidence", "learning", "decision"]
+    unknown = sorted(set(include or []) - set(INCLUDE))
+    if unknown:
+        raise ToolError(f"include aceita só {', '.join(INCLUDE)}; recebeu {', '.join(unknown)}.")
+    include = include or list(INCLUDE)
     if kinds or source_system:
         # Tipo e origem são atributos de evidência; pedir por eles restringe a busca.
         include = ["evidence"]
     limit = max(1, min(int(limit), 50))
-    # O filtro por tag é pelo nome exato, dobrado; como no stub, as palavras da
-    # tag também entram como termos, passando por `terms()`: tag crua em
-    # to_tsquery seria erro de sintaxe com "(" ou "&".
-    wanted_tags = [name for name in (fold(tag).strip() for tag in (tags or [])) if name]
+    # O filtro por tag é pelo nome exato, dobrado como na escrita (fold_tags);
+    # tag fora do padrão não é recusada, só não casa com nada. Como no stub, as
+    # palavras da tag também entram como termos, passando por `terms()`: tag
+    # crua em to_tsquery seria erro de sintaxe com "(" ou "&".
+    wanted_tags = fold_tags(tags)
     words = terms(query)
     for tag in wanted_tags:
         words += [w for w in terms(tag) if w not in words]
@@ -2120,6 +2169,14 @@ def get_decision(conn, id: str | None, slug: str | None) -> models.DecisionData:
     )
 
 
+def _like_literal(text: str | None) -> str | None:
+    """`text` para ILIKE ... ESCAPE '\\' casando como texto: % e _ de quem chama
+    não viram curinga."""
+    if text is None:
+        return None
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def pending_reviews(conn, owner_email: str | None, project: str | None, overdue_only: bool,
                     include_unattested: bool) -> models.PendingReviewsData:
     reference = today()
@@ -2133,10 +2190,11 @@ def pending_reviews(conn, owner_email: str | None, project: str | None, overdue_
           LEFT JOIN project pr ON pr.id = d.project_id
          WHERE r.done_on IS NULL
            AND (%(owner)s::text IS NULL OR lower(p.email) = lower(%(owner)s))
-           AND (%(project)s::text IS NULL OR pr.name ILIKE '%%' || %(project)s || '%%')
+           AND (%(project)s::text IS NULL
+                OR pr.name ILIKE '%%' || %(project)s || '%%' ESCAPE '\\')
          ORDER BY r.due_on, d.id, r.id
         """,
-        {"owner": owner_email, "project": project},
+        {"owner": owner_email, "project": _like_literal(project)},
     ).fetchall()
     reviews = []
     for r in rows:
@@ -2546,6 +2604,30 @@ def test_resumo_em_texto_corta_a_consulta(server):
     res = call(server, "search_evidence", {"query": consulta})
     assert res.structured_content["data"]["query"] == consulta
     assert "x" * 121 not in res.content[0].text
+
+
+def test_include_desconhecido_e_recusado_com_os_valores_aceitos(server):
+    with pytest.raises(ToolError) as excinfo:
+        call(server, "search_evidence", {"query": "checkout", "include": ["evidence", "lesson"]})
+    texto = str(excinfo.value)
+    assert "lesson" in texto
+    assert all(v in texto for v in ("evidence", "learning", "decision"))
+
+
+def test_filtro_de_projeto_trata_curinga_como_texto(server):
+    def reviews(project):
+        return call(server, "list_pending_reviews",
+                    {"project": project}).structured_content["data"]["reviews"]
+
+    assert reviews("checkout")  # o filtro funciona
+    for curinga in ("%", "_", "\\", "Checkout_2026", "%2026"):
+        assert reviews(curinga) == [], curinga
+
+
+def test_filtro_por_tag_usa_a_mesma_normalizacao_da_escrita(server, evidencia_com_tag_composta):
+    # Repetida, com acento, caixa e espaço: a mesma dobra de writes.fold_tags.
+    args = {"query": "", "tags": ["Página-Única", "pagina-unica ", "  "]}
+    assert _ids(server, args) == [evidencia_com_tag_composta]
 ```
 
 Se `test_duas_revisoes_vencidas` falhar, compare com o stub (`server/tests/test_stub.py`,
@@ -3312,6 +3394,16 @@ def test_padrao_de_tag_e_o_do_contrato():
 
     walk(schema)
     assert patterns == {writes.TAG_PATTERN}
+
+
+def test_user_agent_longo_e_cortado_na_procedencia(server, admin_conn):
+    with acting_as(ANA, "cliente/" + "x" * 500):
+        res = run(server.call_tool("propose_decision",
+                                   {**PROPOSTA, "title": "Decisão zeppelin de cliente prolixo"}))
+    did = res.structured_content["data"]["decision_id"]
+    ref = admin_conn.execute("SELECT source_ref FROM provenance WHERE object_type = 'decision' "
+                             "AND object_id = %s", (did,)).fetchone()[0]
+    assert ref == "mcp; client=cliente/" + "x" * (writes.MAX_CLIENT - len("cliente/"))
 ```
 
 **Passo 2: rodar e ver falhar.** Esperado: `Unknown tool: propose_decision` ou equivalente.
@@ -3338,6 +3430,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from . import identity
 from .config import today
+from .db import evidence_attested
 from .guard import fold
 
 EVIDENCE_KINDS = ("experiment", "study", "analysis", "document", "external")
@@ -3360,6 +3453,8 @@ AUTHOR_KIND = "agent"
 # sem estado. Não inventamos: 'unknown', e o cliente (User-Agent) vai para
 # source_ref. Ver README, "Divergências".
 UNKNOWN_MODEL = "unknown"
+# O User-Agent vem de quem chama e não tem teto; em source_ref, até isso.
+MAX_CLIENT = 200
 
 DECIDER_NOT_FOUND = (
     "Pessoa não encontrada. Confirme o e-mail com o usuário; o registro não foi criado."
@@ -3470,23 +3565,31 @@ def _provenance(conn, object_type: str, object_id: uuid.UUID, principal: uuid.UU
         "INSERT INTO provenance (object_type, object_id, author_kind, principal_person_id, "
         "model, source_ref) VALUES (%s, %s, %s, %s, %s, %s)",
         (object_type, object_id, AUTHOR_KIND, principal, UNKNOWN_MODEL,
-         f"mcp; client={identity.current_client() or 'desconhecido'}"),
+         f"mcp; client={(identity.current_client() or 'desconhecido')[:MAX_CLIENT]}"),
     )
 
 
-def normalize_tags(tags: list[str] | None) -> list[str]:
+def fold_tags(tags: list[str] | None) -> list[str]:
     """Minúsculas, sem acento e sem espaço nas pontas; vazias somem, repetidas também.
 
-    O que sobra tem de casar com TAG_PATTERN, o padrão do contrato — o que
-    também satisfaz o CHECK de tag (name = lower(name) AND name <> ''). Fora
-    dele (tab, caractere invisível, emoji, '#'), recusa dizendo qual tag.
+    Serve à escrita (por normalize_tags) e ao filtro de tag da busca, para que
+    as duas pontas dobrem a tag do mesmo jeito.
     """
-    names = {fold(tag).strip() for tag in tags or []} - {""}
-    for name in sorted(names):
+    return sorted({fold(tag).strip() for tag in tags or []} - {""})
+
+
+def normalize_tags(tags: list[str] | None) -> list[str]:
+    """fold_tags, e o que sobra tem de casar com TAG_PATTERN, o padrão do contrato.
+
+    Isso também satisfaz o CHECK de tag (name = lower(name) AND name <> ''). Fora
+    do padrão (tab, caractere invisível, emoji, '#'), recusa dizendo qual tag.
+    """
+    names = fold_tags(tags)
+    for name in names:
         if not _TAG_RE.fullmatch(name):
             raise ToolError(f"Tag fora do padrão {TAG_PATTERN}: {name!r}. Use letras "
                             "minúsculas, dígitos, espaço e _ . / -; nada foi gravado.")
-    return sorted(names)
+    return names
 
 
 def _tags(conn, link_table: str, fk: str, object_id: uuid.UUID, tags: list[str] | None) -> None:
@@ -3735,8 +3838,7 @@ def attach_evidence(conn, *, decision_id: str, role: str, evidence_id: str | Non
 
     final_role, already = _link(conn, did, eid, role, weight, note)
     row = conn.execute(
-        "SELECT CASE WHEN EXISTS (SELECT 1 FROM provenance WHERE object_type = 'evidence' "
-        "AND object_id = %s AND attested_at IS NOT NULL) THEN 'attested' ELSE 'proposed' END "
+        f"SELECT CASE WHEN {evidence_attested('%s')} THEN 'attested' ELSE 'proposed' END "
         "AS state, EXISTS (SELECT 1 FROM decision_evidence WHERE decision_id = %s "
         "AND role = 'contradicts') AS contested", (eid, did)).fetchone()
     # Só cobra a evidência contrária quando este vínculo é novo, favorável, e a
