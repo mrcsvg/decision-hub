@@ -62,7 +62,7 @@ Isso é atestação humana, por princípio do próprio projeto
 
 ## Rodar os testes
 
-Os quatro abaixo são exatamente o que a CI roda
+Os cinco abaixo são exatamente o que a CI roda
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 ### Invariantes do banco
@@ -114,3 +114,21 @@ A suíte também valida o corpus de fixtures contra o contrato de ingestão.
 pip install -r server/requirements.txt
 python -m pytest server/tests -q
 ```
+
+### Servidor MCP
+
+Precisa de um PostgreSQL 16 local **dedicado aos testes**, com um banco vazio
+**cujo nome termine em `_test`**: a suíte recria o schema `public`, aplica
+`schema.sql` e `grants.sql`, troca a senha do papel `dm_app` (que vale para o
+cluster todo) e carrega as fixtures. Por isso ela se recusa a rodar fora de
+localhost, em instância que hospede algum banco que não seja `*_test` e no
+Cloud SQL, mesmo pelo Auth Proxy.
+
+```bash
+pip install -r server/requirements-app-test.txt
+DM_TEST_ADMIN_URL=postgresql://postgres:postgres@localhost:5432/decision_memory_test \
+  python -m pytest server/tests_real -q
+```
+
+Com Docker, suba o container com `-e POSTGRES_DB=decision_memory_test`; o
+`decision_memory` do exemplo das invariantes faria a suíte recusar a instância.

@@ -93,3 +93,40 @@ jobs:
       # fixtures contra spec/experiment-record-v0.schema.json.
       - name: Rodar os testes do stub
         run: python -m pytest server/tests -q
+
+  app:
+    name: Servidor MCP
+    runs-on: ubuntu-latest
+
+    # A suíte recria o schema public e altera o papel dm_app do cluster: a
+    # instância tem de ser dedicada a ela, só com bancos *_test.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: decision_memory_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      DM_TEST_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/decision_memory_test
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Instalar as dependências do servidor
+        run: pip install -r server/requirements-app-test.txt
+
+      # Schema, grants e fixtures são aplicados do zero pela própria suíte.
+      - name: Rodar os testes do servidor
+        run: python -m pytest server/tests_real -q
