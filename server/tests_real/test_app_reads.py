@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 from conftest import run
 
+from decision_memory import reads
+from decision_memory.guard import fold
 from decision_memory.reads import terms
 from decision_memory.seed import fid
 from decision_memory.server import build_server
@@ -122,3 +124,39 @@ def test_operadores_de_tsquery_na_consulta_sao_inofensivos(server, consulta):
     res = call(server, "search_evidence", {"query": consulta})
     assert not res.is_error
     assert "data" in res.structured_content
+
+
+def _ids(server, args):
+    res = call(server, "search_evidence", args)
+    return [i["id"] for i in res.structured_content["data"]["items"]]
+
+
+def test_busca_ignora_acento_e_caixa(server):
+    """Como no stub: consulta sem acento acha texto com acento, e vice-versa."""
+    com_acento = _ids(server, {"query": "confirmação"})
+    assert com_acento
+    assert _ids(server, {"query": "confirmacao"}) == com_acento
+    assert _ids(server, {"query": "CONFIRMAÇÃO"}) == com_acento
+
+
+def test_termos_saem_sem_acento():
+    assert terms("CONFIRMAÇÃO não Conversão") == ["confirmacao", "conversao"]
+
+
+@pytest.mark.parametrize("collation", ["", ' COLLATE "C"'])
+def test_dobra_no_banco_independe_da_collation(admin_conn, collation):
+    """Com collation C, lower() não mexe em Ç nem Ã; a dobra tem de dar conta."""
+    sql = reads.fold_sql(f"(%s::text{collation})")
+    assert admin_conn.execute(f"SELECT {sql}", ("CONFIRMAÇÃO Ações ÚNICA",)).fetchone()[0] \
+        == "confirmacao acoes unica"
+
+
+def test_dobra_do_banco_e_do_python_concordam():
+    assert len(reads.ACCENTED) == len(reads.PLAIN)
+    for com, sem in zip(reads.ACCENTED, reads.PLAIN, strict=True):
+        assert fold(com) == sem, com
+
+
+def test_operadores_de_tsquery_nas_tags_sao_inofensivos(server):
+    res = call(server, "search_evidence", {"query": "checkout", "tags": ["x & !y", "(z", "a:*"]})
+    assert not res.is_error

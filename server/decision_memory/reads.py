@@ -24,9 +24,40 @@ CASE WHEN EXISTS (SELECT 1 FROM provenance p WHERE p.object_type = 'evidence'
      THEN 'attested' ELSE 'proposed' END
 """
 
+# O dicionário 'simple' guarda o acento, e a coluna `search` do schema também:
+# "confirmacao" não casaria com "confirmação". Tirar o acento no próprio schema
+# (extensão unaccent na coluna gerada) é mudança de spec e pede ADR; por ora o
+# texto é dobrado aqui, na hora da consulta, e os termos saem dobrados de
+# `terms()`. Letras maiúsculas acentuadas estão na lista porque, com collation
+# C, lower() não mexe em Ç nem Ã. Letra acentuada fora da lista (não usada em
+# português) continua com acento no banco e não casa.
+#
+# Custo: o tsvector é calculado linha a linha e o índice GIN de `search` não
+# é usado. Com o volume da v0 não pesa; quando pesar, a saída é unaccent numa
+# coluna gerada com índice, via ADR.
+ACCENTED = "áàâãäéèêëíìîïóòôõöúùûüçñÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑ"
+PLAIN = "aaaaaeeeeiiiiooooouuuucn" * 2
+
+
+def fold_sql(text_sql: str) -> str:
+    """Expressão SQL que põe `text_sql` em minúsculas e sem acento, como `fold`."""
+    return f"translate(lower({text_sql}), '{ACCENTED}', '{PLAIN}')"
+
+
+def _folded_tsvector(text_sql: str) -> str:
+    return f"to_tsvector('simple', {fold_sql(text_sql)})"
+
+
+# O mesmo texto de que o schema gera a coluna `search` de cada tabela.
+_EV_TEXT = _folded_tsvector("coalesce(e.title, '') || ' ' || coalesce(e.summary, '')")
+_DC_TEXT = _folded_tsvector(
+    "coalesce(d.title, '') || ' ' || coalesce(d.context, '') || ' ' || coalesce(d.description, '')"
+)
+_LN_TEXT = _folded_tsvector("l.summary")
+
 # Termos em OR: a relevância é decidida em Python, com a mesma regra do stub.
-_HITS = "(SELECT count(*) FROM unnest(%(terms)s::text[]) term WHERE {alias}.search @@ to_tsquery('simple', term))"
-_CANDIDATE = "(%(any)s::text IS NULL OR {alias}.search @@ to_tsquery('simple', %(any)s) OR {tags} && %(folded)s::text[])"
+_HITS = "(SELECT count(*) FROM unnest(%(terms)s::text[]) term WHERE {vec} @@ to_tsquery('simple', term))"
+_CANDIDATE = "(%(any)s::text IS NULL OR {vec} @@ to_tsquery('simple', %(any)s) OR {tags} && %(terms)s::text[])"
 
 _EV_TAGS = "ARRAY(SELECT t.name FROM evidence_tag x JOIN tag t ON t.id = x.tag_id WHERE x.evidence_id = e.id)"
 _LN_TAGS = "ARRAY(SELECT t.name FROM learning_tag x JOIN tag t ON t.id = x.tag_id WHERE x.learning_id = l.id)"
@@ -35,9 +66,9 @@ _DC_TAGS = "ARRAY(SELECT t.name FROM decision_tag x JOIN tag t ON t.id = x.tag_i
 SEARCH_EVIDENCE_SQL = f"""
 SELECT e.id::text AS id, e.title, e.summary, e.strength::text AS strength,
        e.source_system, e.external_id, e.url, {_EV_TAGS} AS tags,
-       {_HITS.format(alias="e")} AS hits, {EVIDENCE_STATE} AS state
+       {_HITS.format(vec=_EV_TEXT)} AS hits, {EVIDENCE_STATE} AS state
   FROM evidence e
- WHERE {_CANDIDATE.format(alias="e", tags=_EV_TAGS)}
+ WHERE {_CANDIDATE.format(vec=_EV_TEXT, tags=_EV_TAGS)}
    AND (%(kinds)s::text[] IS NULL OR e.kind::text = ANY(%(kinds)s))
    AND (%(source_system)s::text IS NULL OR e.source_system = %(source_system)s)
    AND (%(tags)s::text[] IS NULL OR {_EV_TAGS} && %(tags)s::text[])
@@ -45,28 +76,34 @@ SELECT e.id::text AS id, e.title, e.summary, e.strength::text AS strength,
 
 SEARCH_LEARNING_SQL = f"""
 SELECT l.id::text AS id, l.summary AS title, NULL AS summary, l.state::text AS state,
-       {_LN_TAGS} AS tags, {_HITS.format(alias="l")} AS hits
+       {_LN_TAGS} AS tags, {_HITS.format(vec=_LN_TEXT)} AS hits
   FROM learning l
- WHERE {_CANDIDATE.format(alias="l", tags=_LN_TAGS)}
+ WHERE {_CANDIDATE.format(vec=_LN_TEXT, tags=_LN_TAGS)}
    AND (%(tags)s::text[] IS NULL OR {_LN_TAGS} && %(tags)s::text[])
 """
 
 SEARCH_DECISION_SQL = f"""
 SELECT d.id::text AS id, d.title, d.description AS summary, d.state::text AS state,
-       {_DC_TAGS} AS tags, {_HITS.format(alias="d")} AS hits
+       {_DC_TAGS} AS tags, {_HITS.format(vec=_DC_TEXT)} AS hits
   FROM decision d
- WHERE {_CANDIDATE.format(alias="d", tags=_DC_TAGS)}
+ WHERE {_CANDIDATE.format(vec=_DC_TEXT, tags=_DC_TAGS)}
    AND (%(tags)s::text[] IS NULL OR {_DC_TAGS} && %(tags)s::text[])
 """
 
 
 def terms(text: str) -> list[str]:
-    """Palavras da consulta, em minúsculas e com acento (o dicionário 'simple'
-    guarda o acento), sem stopwords e sem repetição."""
-    raw = "".join(ch if ch.isalnum() else " " for ch in text.lower()).split()
+    """Palavras da consulta, em minúsculas e sem acento, sem stopwords e sem
+    repetição.
+
+    Só letras e dígitos sobrevivem: cada termo vai para to_tsquery, e nenhum
+    operador (& | ! : * ( ) ' <->) pode chegar lá. A dobra vem antes do corte
+    para que texto em forma decomposta (e + acento combinante) não parta a
+    palavra ao meio.
+    """
+    raw = "".join(ch if ch.isalnum() else " " for ch in fold(text)).split()
     out: list[str] = []
     for word in raw:
-        if len(word) > 2 and fold(word) not in STOPWORDS and word not in out:
+        if len(word) > 2 and word not in STOPWORDS and word not in out:
             out.append(word)
     return out
 
@@ -93,10 +130,13 @@ def search(conn, query: str, tags: list[str] | None, kinds: list[str] | None,
         include = ["evidence"]
     limit = max(1, min(int(limit), 50))
     wanted_tags = [fold(tag) for tag in (tags or [])]
-    words = terms(query) + [w for w in wanted_tags if w not in terms(query)]
-    folded = [fold(w) for w in words]
+    # Como no stub, as tags pedidas entram como termos, passando por `terms()`:
+    # tag crua em to_tsquery seria erro de sintaxe com "(" ou "&".
+    words = terms(query)
+    for tag in wanted_tags:
+        words += [w for w in terms(tag) if w not in words]
     params: dict[str, Any] = {
-        "terms": words, "folded": folded,
+        "terms": words,
         "any": " | ".join(words) or None,
         "kinds": kinds or None, "source_system": source_system,
         "tags": wanted_tags or None,
@@ -105,7 +145,7 @@ def search(conn, query: str, tags: list[str] | None, kinds: list[str] | None,
     scored: list[tuple[float, models.SearchItem]] = []
 
     def keep(row: dict, item: models.SearchItem) -> None:
-        tag_hits = len(set(folded) & set(row["tags"]))
+        tag_hits = len(set(words) & set(row["tags"]))
         score = relevance(len(words), row["hits"], tag_hits)
         if score > 0:
             scored.append((score, item))
