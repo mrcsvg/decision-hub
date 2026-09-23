@@ -21,6 +21,7 @@
 --   2. decision guarda cargo e área do decisor NA DATA da decisão.
 --   3. assignment não admite vigências sobrepostas para a mesma pessoa.
 --   4. evidence é idempotente por (source_system, external_id).
+--   5. escrita por agente é idempotente por (pessoa, chave): idempotency_key.
 -- =============================================================================
 
 BEGIN;
@@ -332,6 +333,17 @@ CREATE TABLE provenance (
     attested_at          timestamptz,
     CHECK ((attested_by IS NULL) = (attested_at IS NULL)),
     CHECK (author_kind <> 'agent' OR (model IS NOT NULL AND principal_person_id IS NOT NULL))
+);
+
+-- Idempotência de escrita por agente (propose_decision). Reenvio com a mesma
+-- chave, pela mesma pessoa, devolve o registro já criado em vez de duplicá-lo.
+CREATE TABLE idempotency_key (
+    principal_person_id  uuid        NOT NULL REFERENCES person (id),
+    key                  text        NOT NULL CHECK (key <> ''),
+    object_type          text        NOT NULL CHECK (object_type IN ('decision')),
+    object_id            uuid        NOT NULL,  -- sem FK: polimórfico por object_type (hoje só 'decision')
+    created_at           timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (principal_person_id, key)
 );
 
 -- -----------------------------------------------------------------------------

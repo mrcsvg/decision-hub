@@ -36,10 +36,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # O banco sobe vazio a cada execução: o schema é aplicado do zero e as
-      # invariantes rodam numa transação desfeita ao final.
-      - name: Aplicar o schema e rodar as invariantes
-        run: psql -v ON_ERROR_STOP=1 -f db/schema.sql -f db/test_invariants.sql
+      # O banco sobe vazio a cada execução: o schema e o papel dm_app são
+      # aplicados do zero e as invariantes rodam numa transação desfeita ao
+      # final.
+      - name: Aplicar o schema e os grants e rodar as invariantes
+        run: psql -v ON_ERROR_STOP=1 -f db/schema.sql -f db/grants.sql -f db/test_invariants.sql
 
   spec:
     name: Exemplos contra o contrato
@@ -92,3 +93,45 @@ jobs:
       # fixtures contra spec/experiment-record-v0.schema.json.
       - name: Rodar os testes do stub
         run: python -m pytest server/tests -q
+
+  app:
+    name: Servidor MCP
+    runs-on: ubuntu-latest
+
+    # A suíte recria o schema public e altera o papel dm_app do cluster: a
+    # instância tem de ser dedicada a ela, só com bancos *_test.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: decision_memory_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      DM_TEST_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/decision_memory_test
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Instalar as dependências do servidor
+        run: pip install -r server/requirements-app-test.txt
+
+      # Schema, grants e fixtures são aplicados do zero pela própria suíte.
+      - name: Rodar os testes do servidor
+        run: python -m pytest server/tests_real -q
+
+      # A imagem que vai ao Cloud Run (gcloud run deploy --source server) tem de
+      # construir; o build pega Dockerfile, requirements e .dockerignore quebrados.
+      - name: Construir a imagem do servidor
+        run: docker build -t decision-memory:ci server

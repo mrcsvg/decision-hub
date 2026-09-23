@@ -1,0 +1,4 @@
+*
+!requirements-app.txt
+!decision_memory/
+decision_memory/__pycache__/

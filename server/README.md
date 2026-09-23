@@ -10,6 +10,9 @@ A pergunta que ele existe para responder está no
 antes de redigir, sem ser pedido? Responder isso agora custa uma tarde.
 Responder depois de construir o backend custa o backend.
 
+O servidor de verdade, sobre o Postgres, está em
+[`decision_memory/`](decision_memory/README.md).
+
 ## O que ele não faz
 
 - Não tem banco. `db/schema.sql` não é tocado.

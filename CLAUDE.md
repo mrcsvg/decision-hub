@@ -5,9 +5,10 @@ Superfície MCP em [`MCP_TOOLS.md`](MCP_TOOLS.md), contrato de ingestão em
 [`spec/README.md`](spec/README.md). Leia antes de mudar qualquer coisa. Não
 repita o conteúdo deles aqui.
 
-Estado: v0, especificação e modelo de dados. Não há servidor: o que existe em
-[`server/`](server/README.md) é um stub sobre fixtures, andaime para medir se o
-agente chama as ferramentas na hora certa. O que vem depois está em
+Estado: v0, especificação e modelo de dados. Em [`server/`](server/README.md)
+há um stub sobre fixtures, andaime para medir se o agente chama as ferramentas
+na hora certa, e o servidor sobre o Postgres, em
+[`server/decision_memory/`](server/decision_memory/README.md). O que vem depois está em
 [Próximos passos](docs/concepcao.md#próximos-passos) — não antecipe etapa sem
 combinar.
 
@@ -62,17 +63,19 @@ Isso é atestação humana, por princípio do próprio projeto
 
 ## Rodar os testes
 
-Os quatro abaixo são exatamente o que a CI roda
+Os cinco abaixo são exatamente o que a CI roda
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 ### Invariantes do banco
 
 Precisa de um PostgreSQL 16 vazio. As invariantes rodam numa transação desfeita
-ao final.
+ao final; `schema.sql` e `grants.sql`, não — o `dropdb` leva o banco, mas o papel
+`dm_app` é do cluster e fica, assim como o `REVOKE CREATE ON SCHEMA public FROM
+PUBLIC` fica no banco em que rodou, se ele for reaproveitado (o do Docker abaixo).
 
 ```bash
 createdb decision_memory_test
-psql -v ON_ERROR_STOP=1 -d decision_memory_test -f db/schema.sql -f db/test_invariants.sql
+psql -v ON_ERROR_STOP=1 -d decision_memory_test -f db/schema.sql -f db/grants.sql -f db/test_invariants.sql
 dropdb decision_memory_test
 ```
 
@@ -83,7 +86,7 @@ docker run --rm -d --name dm-pg -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=decision_memory -p 5432:5432 postgres:16
 until pg_isready -h localhost -U postgres -q; do sleep 1; done
 PGHOST=localhost PGUSER=postgres PGPASSWORD=postgres PGDATABASE=decision_memory \
-  psql -v ON_ERROR_STOP=1 -f db/schema.sql -f db/test_invariants.sql
+  psql -v ON_ERROR_STOP=1 -f db/schema.sql -f db/grants.sql -f db/test_invariants.sql
 docker rm -f dm-pg
 ```
 
@@ -114,3 +117,21 @@ A suíte também valida o corpus de fixtures contra o contrato de ingestão.
 pip install -r server/requirements.txt
 python -m pytest server/tests -q
 ```
+
+### Servidor MCP
+
+Precisa de um PostgreSQL 16 local **dedicado aos testes**, com um banco vazio
+**cujo nome termine em `_test`**: a suíte recria o schema `public`, aplica
+`schema.sql` e `grants.sql`, troca a senha do papel `dm_app` (que vale para o
+cluster todo) e carrega as fixtures. Por isso ela se recusa a rodar fora de
+localhost, em instância que hospede algum banco que não seja `*_test` e no
+Cloud SQL, mesmo pelo Auth Proxy.
+
+```bash
+pip install -r server/requirements-app-test.txt
+DM_TEST_ADMIN_URL=postgresql://postgres:postgres@localhost:5432/decision_memory_test \
+  python -m pytest server/tests_real -q
+```
+
+Com Docker, suba o container com `-e POSTGRES_DB=decision_memory_test`; o
+`decision_memory` do exemplo das invariantes faria a suíte recusar a instância.

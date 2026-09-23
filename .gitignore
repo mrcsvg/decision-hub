@@ -7,3 +7,6 @@ venv/
 
 # Log de invocações do stub (dado de execução, não de repositório)
 server/run/
+
+# Pessoas reais para a carga (decision_memory.seed --people): e-mail não vai para o git
+pessoas*.csv

@@ -43,8 +43,12 @@ Existem boas ferramentas para cada tipo de evidência isolado — plataformas de
 │   └── examples/
 ├── db/
 │   ├── schema.sql                     modelo lógico em PostgreSQL
-│   └── test_invariants.sql
-└── server/                            stub MCP sobre fixtures, para testar invocação
+│   ├── grants.sql                     papel dm_app do servidor MCP: só lê e acrescenta
+│   ├── test_invariants.sql
+│   └── migrations/                    o que schema.sql ganhou, para banco já criado
+└── server/
+    ├── decision_memory_stub/          stub MCP sobre fixtures, para testar invocação
+    └── decision_memory/               servidor MCP sobre Postgres, para o Cloud Run
 ```
 
 ## Rodar o schema
@@ -52,10 +56,11 @@ Existem boas ferramentas para cada tipo de evidência isolado — plataformas de
 ```bash
 createdb decision_memory
 psql -v ON_ERROR_STOP=1 -d decision_memory -f db/schema.sql
+psql -v ON_ERROR_STOP=1 -d decision_memory -f db/grants.sql
 psql -v ON_ERROR_STOP=1 -d decision_memory -f db/test_invariants.sql
 ```
 
-Requer PostgreSQL 14 ou superior com a extensão `btree_gist`. Os testes rodam numa transação desfeita ao final e verificam as invariantes que o banco garante sozinho: expectativa append-only e anterior ao desfecho, vínculo organizacional na data da decisão, vigências sem sobreposição e ingestão idempotente.
+Requer PostgreSQL 14 ou superior com a extensão `btree_gist`. Os testes rodam numa transação desfeita ao final e verificam as invariantes que o banco garante sozinho: expectativa append-only e anterior ao desfecho, vínculo organizacional na data da decisão, vigências sem sobreposição, ingestão idempotente e o papel `dm_app`, que só lê e acrescenta.
 
 ### Instância no Cloud SQL
 
@@ -92,10 +97,15 @@ Este projeto registra as próprias decisões no formato que propõe. Todas estã
 | [0002](docs/adr/0002-mcp-first.md) | Interface MCP-first | Proposto |
 | [0003](docs/adr/0003-normalizar-afirmacao.md) | Normalizar a afirmação, não a estimativa | Proposto |
 | [0004](docs/adr/0004-somente-leitura.md) | Somente leitura sobre as fontes | Proposto |
+| [0005](docs/adr/0005-estado-da-evidencia.md) | O estado da evidência vem da procedência | Proposto |
 
 ## Estado
 
-v0 — especificação e modelo de dados. Sem servidor implementado ainda: o que há em [`server/`](server/README.md) é um stub que responde as seis ferramentas a partir de fixtures fictícias, para medir se um agente as invoca no momento certo antes de existir backend. Próximos passos em [`docs/concepcao.md`](docs/concepcao.md#próximos-passos).
+v0 — especificação e modelo de dados. Em [`server/`](server/README.md) há um stub que responde as seis ferramentas a partir de fixtures fictícias, para medir se um agente as invoca no momento certo antes de existir backend. Próximos passos em [`docs/concepcao.md`](docs/concepcao.md#próximos-passos).
+
+Há também um servidor de verdade em [`server/decision_memory/`](server/decision_memory/README.md):
+as seis ferramentas sobre o Postgres, feito para o Cloud Run e acessado por IAM. Sem OAuth e sem
+superfície de atestação ainda.
 
 ## Licença
 
