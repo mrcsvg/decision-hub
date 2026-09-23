@@ -1533,16 +1533,22 @@ Troque também a docstring do módulo para dizer que é do servidor real.
 ```python
 """O bloco `pending`: o lembrete que viaja junto de toda resposta.
 
-Curto, específico e ligado ao que acabou de acontecer. Vem vazio, nunca ausente.
+É a mitigação nº 1 do ADR 0002: o servidor não controla quando é chamado, então
+o lembrete vai na resposta. Curto, específico e ligado ao que acabou de
+acontecer. Vem vazio, nunca ausente.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from .config import today
 from .models import Pending, ReviewDue
 
 MAX_REVIEWS_DUE = 3
 
+# Evidência não tem coluna de estado: está atestada quando alguma procedência
+# dela tem attested_at (ADR 0005).
 UNATTESTED_COUNT_SQL = """
 SELECT (SELECT count(*) FROM decision WHERE state = 'proposed')
      + (SELECT count(*) FROM learning WHERE state = 'proposed')
@@ -1552,6 +1558,7 @@ SELECT (SELECT count(*) FROM decision WHERE state = 'proposed')
                               AND p.attested_at IS NOT NULL)) AS n
 """
 
+# Só revisões já vencidas: as que ainda não venceram não são cobrança, são ruído.
 OVERDUE_SQL = """
 SELECT d.id::text AS decision_id, d.title, r.due_on,
        ARRAY(SELECT t.name FROM decision_tag dt JOIN tag t ON t.id = dt.tag_id
@@ -1561,9 +1568,15 @@ SELECT d.id::text AS decision_id, d.title, r.due_on,
 """
 
 
-def _hint(due: list[ReviewDue], unattested: int, context_tags: set[str]) -> str | None:
+def _hint(due: list[ReviewDue], unattested: int, shared_tags: set[str]) -> str | None:
+    """Uma frase para o agente.
+
+    `shared_tags` são as tags do contexto que alguma revisão vencida também tem.
+    Diferente do stub, que citava a primeira tag do contexto mesmo sem relação
+    com as revisões, aqui só se cita tag que de fato liga as duas coisas.
+    """
     if due:
-        tag = next(iter(sorted(context_tags)), None)
+        tag = next(iter(sorted(shared_tags)), None)
         escopo = f" relacionada à tag {tag}" if tag else ""
         plural = "revisões vencidas" if len(due) > 1 else "revisão vencida"
         return f"Há {len(due)} {plural}{escopo}. Mencione ao usuário antes de prosseguir."
@@ -1575,25 +1588,38 @@ def _hint(due: list[ReviewDue], unattested: int, context_tags: set[str]) -> str 
     return None
 
 
-def build(conn, *, context_tags: set[str] | None = None,
-          on_this_record: list[str] | None = None) -> Pending:
+def build(
+    conn: Any,
+    *,
+    context_tags: set[str] | None = None,
+    on_this_record: list[str] | None = None,
+) -> Pending:
+    """Monta o bloco. `conn` usa dict_row, como as conexões do pool."""
     context_tags = context_tags or set()
     reference = today()
-    scored = []
+    scored: list[tuple[int, int, str, ReviewDue, set[str]]] = []
     for row in conn.execute(OVERDUE_SQL, {"today": reference}).fetchall():
-        shares_tag = 1 if context_tags & set(row["tags"]) else 0
+        shared = context_tags & set(row["tags"])
         overdue = (reference - row["due_on"]).days
-        scored.append((shares_tag, overdue, ReviewDue(
-            decision_id=row["decision_id"], title=row["title"],
-            due_on=row["due_on"].isoformat(), overdue_days=overdue)))
-    scored.sort(key=lambda r: (r[0], r[1]), reverse=True)
-    due = [r[2] for r in scored[:MAX_REVIEWS_DUE]]
+        review = ReviewDue(
+            decision_id=row["decision_id"],
+            title=row["title"],
+            due_on=row["due_on"].isoformat(),
+            overdue_days=overdue,
+        )
+        scored.append((1 if shared else 0, overdue, row["decision_id"], review, shared))
+    # Quem compartilha tag primeiro, depois a mais vencida; o id desempata para
+    # que a ordem não dependa do plano de execução.
+    scored.sort(key=lambda r: (-r[0], -r[1], r[2]))
+    top = scored[:MAX_REVIEWS_DUE]
+    due = [r[3] for r in top]
+    shared_tags = set().union(*(r[4] for r in top))
     unattested = conn.execute(UNATTESTED_COUNT_SQL).fetchone()["n"]
     return Pending(
         on_this_record=on_this_record or [],
         reviews_due=due,
         unattested_count=unattested,
-        hint=_hint(due, unattested, context_tags),
+        hint=_hint(due, unattested, shared_tags),
     )
 ```
 
@@ -4310,7 +4336,8 @@ experimento de invocação.
 
 ## Como a pessoa usa
 
-Pré-requisitos: ter `roles/run.invoker` no serviço e estar cadastrada em `person`.
+Pré-requisitos: ter `roles/run.invoker` no serviço e, para escrever, estar cadastrada em
+`person` (sem cadastro, a leitura funciona e a escrita é recusada).
 
 ```bash
 gcloud auth login
@@ -4329,13 +4356,32 @@ chamado por acidente.
 | --- | --- |
 | `DM_DATABASE_URL` | Conexão do `dm_app`. No Cloud Run: `postgresql://dm_app@/decision_memory?host=/cloudsql/<instância>` |
 | `DM_DATABASE_PASSWORD` | Senha do `dm_app`, injetada do Secret Manager |
-| `DM_EXPECTED_AUDIENCE` | URL(s) do serviço, separadas por vírgula; o `aud` do token precisa bater. Obrigatória no Cloud Run: sem ela o servidor não sobe |
+| `DM_EXPECTED_AUDIENCE` | URL(s) do serviço, separadas por vírgula; o `aud` do token precisa bater. Obrigatória no Cloud Run: sem ela o servidor não sobe. Fora do Cloud Run, vazia desliga a checagem de `aud` |
 | `DM_TODAY` | Só para testes: data de referência das revisões vencidas |
+
+O servidor escuta em `$PORT` (o Cloud Run define), ou 8080. Cada comando SQL tem teto de 5 s,
+e a espera por uma das 4 conexões do pool também.
+
+Para rodar a imagem localmente contra o banco da suíte de testes (carregado por
+`pytest server/tests_real`):
+
+```bash
+docker build -t decision-memory:dev server
+docker run --rm -p 8081:8080 -e DM_TODAY=2026-09-22 \
+  -e DM_DATABASE_URL=postgresql://dm_app:dm_app_test@host.docker.internal:5432/decision_memory_test \
+  decision-memory:dev
+```
 
 ## Deploy
 
 Uma vez por projeto. Com o [Cloud SQL Auth Proxy](../../README.md#instância-no-cloud-sql) na
-porta 5433 e a senha do `dm_admin` em `PGPASSWORD`:
+porta 5433 e a senha do `dm_admin` em `PGPASSWORD`.
+
+**Antes do passo 2, uma decisão em aberto.** O passo 2 carrega no banco compartilhado o corpus
+de `server/fixtures/`, que é fictício, e marca como atestado por `--attested-by` o que as
+fixtures trazem atestado. Com um e-mail real ali, o banco passa a ter dados inventados
+atestados por uma pessoa de verdade. Decidir, antes de rodar: carregar ou não as fixtures
+nesse banco, e em nome de quem.
 
 ```bash
 PROJECT=ufpr-ppgcd
@@ -4344,13 +4390,15 @@ INSTANCE=$PROJECT:$REGION:decision-memory
 SA=dm-server@$PROJECT.iam.gserviceaccount.com
 ADMIN="host=127.0.0.1 port=5433 dbname=decision_memory user=dm_admin"
 
-# 1. Banco: tabela nova, papel do servidor e senha dele
+# 1. Banco: tabela nova, depois o papel do servidor (grants.sql de novo, para a tabela
+#    nova chegar ao dm_app), e a senha dele
 psql "$ADMIN" -v ON_ERROR_STOP=1 \
   -f db/migrations/2026-09-23-idempotency-key.sql -f db/grants.sql
 APP_PASSWORD=$(openssl rand -base64 32)
 psql "$ADMIN" -c "ALTER ROLE dm_app PASSWORD '$APP_PASSWORD'"
 
-# 2. Dados: fixtures + pessoas reais (CSV name,email, fora do git)
+# 2. Dados: fixtures + pessoas reais (CSV name,email, fora do git). Ver a decisão acima.
+#    --attested-by precisa estar entre as pessoas cadastradas (fixtures ou CSV).
 PYTHONPATH=server .venv/bin/python -m decision_memory.seed --database-url "$ADMIN" \
   --attested-by voce@exemplo.com --people pessoas.csv
 
@@ -4390,24 +4438,27 @@ gcloud run services add-iam-policy-binding decision-memory --project $PROJECT \
 ```
 
 **Por que o serviço tem de ficar fechado:** o Cloud Run valida o ID token e o entrega ao
-container sem assinatura. O servidor confia nessa validação. Com o serviço aberto, qualquer um
-forja o e-mail no token e escreve em nome de outra pessoa. Mesmo fechado, quando vêm
+container sem assinatura. O servidor confia nessa validação: lê as claims e confere só `aud`
+(contra `DM_EXPECTED_AUDIENCE`) e `iss` (o Google). Com o serviço aberto, qualquer um forja o
+e-mail no token e escreve em nome de outra pessoa. Mesmo fechado, quando vêm
 `X-Serverless-Authorization` e `Authorization` juntos o Cloud Run só confere o primeiro; por
-isso o servidor, nesse caso, lê a identidade só dele.
+isso o servidor, nesse caso, lê a identidade só dele, e nunca cai para o `Authorization`.
 
 ## Verificação manual depois do deploy
 
 Não há teste automático contra o GCP. Com o proxy do `gcloud run services proxy` no ar:
 
 ```bash
-H='-H accept:application/json,text/event-stream -H content-type:application/json'
-curl -s localhost:8080/mcp $H -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_evidence","arguments":{"query":"checkout"}}}'
+curl -s localhost:8080/mcp \
+  -H 'accept: application/json, text/event-stream' -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_evidence","arguments":{"query":"checkout"}}}'
 ```
 
 1. A resposta traz "Checkout em página única" — leitura e conexão por socket funcionam.
 2. No Claude Code, peça para registrar uma decisão de teste. Deve voltar `state: proposed`.
    Se voltar "Não consegui identificar sua conta", o token não chegou ou o `aud` não bateu:
-   veja nos logs do serviço e ajuste `DM_EXPECTED_AUDIENCE`.
+   veja nos logs do serviço e ajuste `DM_EXPECTED_AUDIENCE`. Se voltar "Sua conta não está
+   cadastrada", falta o e-mail em `person`.
 3. Em `get_decision` da decisão de teste, `provenance.principal` é o seu nome.
 
 ## Divergências em relação a `MCP_TOOLS.md`
@@ -4417,7 +4468,8 @@ curl -s localhost:8080/mcp $H -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
 - **`attest_url` nulo.** Não há superfície de atestação; o que o agente escreve fica
   `proposed`. O loop decisão → expectativa → revisão não fecha neste corte.
 - **`provenance.model` é sempre `unknown`.** O MCP não informa o modelo e o `clientInfo` não
-  chega em modo sem estado. O `User-Agent` do cliente vai para `source_ref`.
+  chega em modo sem estado. O `User-Agent` do cliente vai para `source_ref`
+  (`mcp; client=<User-Agent>`).
 - **Estado da evidência** derivado da procedência ([ADR 0005](../../docs/adr/0005-estado-da-evidencia.md)).
 - **`attach_evidence`: evidência criada por agente não recebe `source_system`/`external_id`;
   identidade de origem vem só da ingestão.** Um par inédito é recusado, de qualquer `kind`;
@@ -4427,21 +4479,24 @@ curl -s localhost:8080/mcp $H -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
   repete; a evidência, sim.
 - **`propose_decision` devolve também `reused`.** Com `idempotency_key` já usada, volta o
   registro gravado (estado e `missing` dele), e o conteúdo da chamada nova não é aplicado.
+- **Tags na escrita** saem em minúsculas e sem acento, e o que não casar com o padrão do
+  contrato de ingestão, `^[a-z0-9][a-z0-9 _./-]*$`, é recusado sem gravar nada.
 - **`list_pending_reviews`**: `unattested` não é filtrado por `owner_email`.
 - **Busca**: dicionário `simple`, sem radical — "conversões" não encontra "conversão".
   Acento e caixa são ignorados, como no stub, dobrando o texto na hora da consulta; por isso o
   índice GIN de `search` não é usado. Quando o volume pedir, `unaccent` numa coluna gerada com
   índice, via ADR.
-- **Busca**: URL e caminho de arquivo viram um token só no parser do Postgres
-  (`checkout.exemplo.com/v2` gera `checkout.exemplo.com` e `/v2`, nunca `checkout`), enquanto
-  o stub partia na pontuação; buscar por uma palavra de dentro deles não acha.
+- **Busca**: URL e caminho de arquivo viram tokens inteiros no parser do Postgres
+  (`checkout.exemplo.com/v2` gera `checkout.exemplo.com/v2`, `checkout.exemplo.com` e `/v2`,
+  nunca `checkout`), enquanto o stub partia na pontuação; buscar por uma palavra de dentro
+  deles não acha.
 - **Busca**: só as 32 primeiras palavras da consulta contam (`MAX_TERMS`).
-- **Banco**: todo comando SQL tem teto de 5 s (`statement_timeout`); estourou, a ferramenta
-  responde erro interno com ref.
+- **Banco**: todo comando SQL tem teto de 5 s (`statement_timeout`), e a espera por conexão
+  livre no pool também; estourou, a ferramenta responde erro interno com ref.
 - **Argumentos**: texto com caractere nulo (`\x00`) é recusado antes da ferramenta, em
   qualquer das seis; o Postgres não guarda esse caractere.
-- **GET /mcp responde 405: sem sessão, não há fluxo SSE do servidor.** DELETE também
-  (`Allow: POST`): não há sessão a encerrar.
+- **GET /mcp responde 405: sem sessão, não há fluxo SSE do servidor.** DELETE também, como
+  qualquer método que não seja POST (`Allow: POST`): não há sessão a encerrar.
 ````
 
 **Passo 2: README raiz.** Em "Estrutura", troque a linha de `server/` por:
