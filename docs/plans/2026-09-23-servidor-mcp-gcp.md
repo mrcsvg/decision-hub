@@ -36,7 +36,13 @@ Fatos verificados antes de escrever este plano (não reverificar):
 - `streamable_http_app` rejeita `Host` fora de `localhost` com 421 por padrão (proteção contra
   DNS rebinding). No Cloud Run é preciso desligar via `TransportSecuritySettings`.
 - O Cloud Run repassa o `Authorization` ao container **sem a assinatura do token**. Não dá
-  para revalidar; lê-se as claims e confere-se `aud`.
+  para revalidar; lê-se as claims e confere-se `aud` e `iss`.
+- Se a requisição traz `X-Serverless-Authorization` e `Authorization`, o Cloud Run confere
+  **só o `X-Serverless-Authorization`** e repassa o outro sem conferir
+  ([service-to-service](https://docs.cloud.google.com/run/docs/authenticating/service-to-service)).
+  Um invocador legítimo poderia forjar um `Authorization` sem assinatura com o e-mail de outra
+  pessoa. Havendo `X-Serverless-Authorization`, a identidade vem só dele — ilegível, não há
+  identidade; nunca se cai para o `Authorization`.
 
 ---
 
@@ -406,19 +412,27 @@ from datetime import date
 class Settings:
     database_url: str
     database_password: str | None
-    # Públicos aceitos no ID token (a URL do serviço). Vazio desliga a checagem.
+    # Públicos aceitos no ID token (a URL do serviço). Vazio desliga a checagem,
+    # o que só é permitido fora do Cloud Run.
     expected_audiences: tuple[str, ...]
     on_cloud_run: bool
 
 
 def load() -> Settings:
     audiences = os.environ.get("DM_EXPECTED_AUDIENCE", "")
-    return Settings(
+    settings = Settings(
         database_url=os.environ["DM_DATABASE_URL"],
         database_password=os.environ.get("DM_DATABASE_PASSWORD"),
         expected_audiences=tuple(a.strip() for a in audiences.split(",") if a.strip()),
         on_cloud_run="K_SERVICE" in os.environ,
     )
+    if settings.on_cloud_run and not settings.expected_audiences:
+        raise RuntimeError(
+            "DM_EXPECTED_AUDIENCE é obrigatório no Cloud Run: sem ele o servidor "
+            "aceitaria token emitido para qualquer outro serviço. Use a URL do "
+            "serviço (https://decision-memory-<número do projeto>.<região>.run.app)."
+        )
+    return settings
 
 
 def today() -> date:
@@ -974,7 +988,8 @@ git commit -m "feat(server): carga idempotente das fixtures no Postgres"
 
 **Arquivos:**
 - Criar: `server/decision_memory/identity.py`, `server/decision_memory/guard.py`
-- Criar: `server/tests_real/test_app_identity.py`
+- Criar: `server/tests_real/test_app_identity.py`, `server/tests_real/test_app_config.py`
+- Modificar: `server/decision_memory/config.py`
 
 **Passo 1: testes.** `server/tests_real/test_app_identity.py`:
 
@@ -984,12 +999,21 @@ from __future__ import annotations
 import base64
 import json
 
-from decision_memory.identity import email_from_authorization
+from decision_memory.guard import forbidden_keys
+from decision_memory.identity import (
+    acting_as,
+    current_client,
+    current_email,
+    email_from_authorization,
+    email_from_headers,
+)
 
 
-def token(claims: dict) -> str:
+def token(claims: dict, iss: str | None = "https://accounts.google.com") -> str:
     """ID token como o Cloud Run entrega ao container: sem assinatura."""
-    enc = lambda obj: base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
+    if iss is not None:
+        claims = {"iss": iss, **claims}
+    enc = lambda obj: base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")  # noqa: E731
     return f"Bearer {enc({'alg': 'RS256'})}.{enc(claims)}."
 
 
@@ -997,8 +1021,10 @@ AUD = "https://decision-memory-abc-rj.a.run.app"
 
 
 def test_le_o_email_do_token():
-    assert email_from_authorization(token({"email": "Ana@Exemplo.com.br", "aud": AUD}), (AUD,)) \
+    assert (
+        email_from_authorization(token({"email": "Ana@Exemplo.com.br", "aud": AUD}), (AUD,))
         == "ana@exemplo.com.br"
+    )
 
 
 def test_sem_header_nao_ha_identidade():
@@ -1007,8 +1033,23 @@ def test_sem_header_nao_ha_identidade():
     assert email_from_authorization("Bearer lixo", (AUD,)) is None
 
 
+def test_payload_ilegivel_nao_ha_identidade():
+    assert email_from_authorization("Bearer a.%%%.b", (AUD,)) is None
+    lista = base64.urlsafe_b64encode(b'["a@b.c"]').decode().rstrip("=")
+    assert email_from_authorization(f"Bearer a.{lista}.", (AUD,)) is None
+
+
 def test_publico_errado_nao_ha_identidade():
     assert email_from_authorization(token({"email": "a@b.c", "aud": "https://outro"}), (AUD,)) is None
+
+
+def test_publico_em_lista():
+    assert (
+        email_from_authorization(token({"email": "a@b.c", "aud": ["https://outro", AUD]}), (AUD,))
+        == "a@b.c"
+    )
+    assert email_from_authorization(token({"email": "a@b.c", "aud": ["https://outro"]}), (AUD,)) is None
+    assert email_from_authorization(token({"email": "a@b.c", "aud": []}), (AUD,)) is None
 
 
 def test_sem_publico_configurado_nao_confere():
@@ -1018,6 +1059,90 @@ def test_sem_publico_configurado_nao_confere():
 def test_email_nao_verificado_nao_vale():
     claims = {"email": "a@b.c", "aud": AUD, "email_verified": False}
     assert email_from_authorization(token(claims), (AUD,)) is None
+
+
+def test_emissor_do_google_nas_duas_grafias():
+    for iss in ("accounts.google.com", "https://accounts.google.com"):
+        assert email_from_authorization(token({"email": "a@b.c", "aud": AUD}, iss), (AUD,)) == "a@b.c"
+
+
+def test_emissor_estranho_ou_ausente_nao_ha_identidade():
+    assert email_from_authorization(token({"email": "a@b.c", "aud": AUD}, "https://evil"), (AUD,)) is None
+    assert email_from_authorization(token({"email": "a@b.c", "aud": AUD}, None), (AUD,)) is None
+
+
+def test_email_verified_ausente_vale():
+    assert email_from_authorization(token({"email": "a@b.c", "aud": AUD}), (AUD,)) == "a@b.c"
+
+
+def test_so_authorization():
+    headers = {"authorization": token({"email": "ana@x.com", "aud": AUD})}
+    assert email_from_headers(headers, (AUD,)) == "ana@x.com"
+
+
+def test_so_x_serverless_authorization():
+    headers = {"x-serverless-authorization": token({"email": "ana@x.com", "aud": AUD})}
+    assert email_from_headers(headers, (AUD,)) == "ana@x.com"
+
+
+def test_com_os_dois_vale_o_que_o_cloud_run_verificou():
+    """Com os dois, o Cloud Run só confere o X-Serverless; o Authorization pode ser forjado."""
+    headers = {
+        "x-serverless-authorization": token({"email": "ana@x.com", "aud": AUD}),
+        "authorization": token({"email": "vitima@x.com", "aud": AUD}),
+    }
+    assert email_from_headers(headers, (AUD,)) == "ana@x.com"
+
+
+def test_x_serverless_ilegivel_nao_cai_para_authorization():
+    headers = {
+        "x-serverless-authorization": "Bearer lixo",
+        "authorization": token({"email": "vitima@x.com", "aud": AUD}),
+    }
+    assert email_from_headers(headers, (AUD,)) is None
+
+
+def test_sem_headers_nao_ha_identidade():
+    assert email_from_headers({}, (AUD,)) is None
+
+
+def test_acting_as_poe_e_restaura_identidade():
+    assert current_email() is None and current_client() is None
+    with acting_as("ana@x.com", "claude-code"):
+        assert (current_email(), current_client()) == ("ana@x.com", "claude-code")
+        with acting_as("bia@x.com"):
+            assert (current_email(), current_client()) == ("bia@x.com", "tests")
+        assert (current_email(), current_client()) == ("ana@x.com", "claude-code")
+    assert current_email() is None and current_client() is None
+
+
+def test_campos_de_expectativa_sao_detectados():
+    args = {
+        "decision_id": "d1",
+        "confidence": 0.8,
+        "confiança": "alta",
+        "resultado_esperado": "sobe",
+        "Expectativa": "x",
+    }
+    assert forbidden_keys(args) == sorted(
+        ["confidence", "confiança", "resultado_esperado", "Expectativa"]
+    )
+
+
+def test_campos_aninhados_sao_detectados():
+    assert forbidden_keys({"meta": {"confidence": 0.8}}) == ["meta.confidence"]
+    assert forbidden_keys({"alternatives": [{"expectativa": "x"}, {"ok": 1}]}) == [
+        "alternatives[0].expectativa"
+    ]
+    # Só chaves: valor com o termo não é recusado.
+    assert forbidden_keys({"summary": "alta confiança", "tags": ["confidence"]}) == []
+
+
+def test_argumentos_limpos_ou_nao_dict_passam():
+    assert forbidden_keys({"decision_id": "d1", "query": "preço"}) == []
+    assert forbidden_keys(None) == []
+    assert forbidden_keys(["confidence"]) == []
+    assert forbidden_keys("confidence") == []
 ```
 
 **Passo 2: rodar e ver falhar.** `.venv/bin/python -m pytest server/tests_real/test_app_identity.py -q` → import falha.
@@ -1028,10 +1153,19 @@ def test_email_nao_verificado_nao_vale():
 """Quem está chamando.
 
 Com o Cloud Run fechado (--no-allow-unauthenticated), a plataforma valida o ID
-token do Google e repassa o header Authorization ao container SEM a assinatura
+token do Google e repassa o header ao container SEM a assinatura
 (https://docs.cloud.google.com/run/docs/troubleshooting). Não há como
 revalidar: o servidor confia na validação da plataforma, lê as claims e confere
-o público. Isso só é seguro com o serviço fechado — ver README, "Deploy".
+público e emissor. Isso só é seguro com o serviço fechado — ver README, "Deploy".
+
+Qual header a plataforma validou: se vierem `X-Serverless-Authorization` e
+`Authorization`, o Cloud Run confere SÓ o primeiro e repassa o segundo intacto
+(https://docs.cloud.google.com/run/docs/authenticating/service-to-service).
+Quem tem acesso ao serviço poderia então mandar o próprio token no
+X-Serverless e um `Authorization` forjado, sem assinatura, com o e-mail de
+outra pessoa. Por isso, havendo X-Serverless-Authorization, a identidade vem
+só dele — e, se ele for ilegível, não há identidade; nunca se cai para o
+Authorization.
 
 A identidade viaja num ContextVar posto pela middleware antes de a ferramenta
 rodar. Testes que chamam a ferramenta direto usam `acting_as`.
@@ -1042,15 +1176,33 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 
 _email: ContextVar[str | None] = ContextVar("dm_principal_email", default=None)
 _client: ContextVar[str | None] = ContextVar("dm_client", default=None)
 
+GOOGLE_ISSUERS = ("accounts.google.com", "https://accounts.google.com")
+
+
+def _audience_ok(aud: object, audiences: tuple[str, ...]) -> bool:
+    """`aud` de um JWT pode ser string ou lista; basta um elemento conferir."""
+    if not audiences:
+        return True
+    if isinstance(aud, str):
+        return aud in audiences
+    if isinstance(aud, list):
+        return any(isinstance(a, str) and a in audiences for a in aud)
+    return False
+
 
 def email_from_authorization(header: str | None, audiences: tuple[str, ...]) -> str | None:
+    """E-mail do ID token no header, ou None se não houver identidade aceitável.
+
+    Sem `audiences` configurado, o público não é conferido. O emissor tem de
+    ser o Google sempre.
+    """
     if not header or not header.lower().startswith("bearer "):
         return None
     parts = header[7:].strip().split(".")
@@ -1063,12 +1215,28 @@ def email_from_authorization(header: str | None, audiences: tuple[str, ...]) -> 
         return None
     if not isinstance(claims, dict):
         return None
-    if audiences and claims.get("aud") not in audiences:
+    if claims.get("iss") not in GOOGLE_ISSUERS:
         return None
+    if not _audience_ok(claims.get("aud"), audiences):
+        return None
+    # Só False recusa: a claim falta em alguns tokens federados, e o header já
+    # foi verificado pela plataforma.
     if claims.get("email_verified") is False:
         return None
     email = claims.get("email")
     return email.strip().lower() if isinstance(email, str) and email.strip() else None
+
+
+def email_from_headers(headers: Mapping[str, str], audiences: tuple[str, ...]) -> str | None:
+    """E-mail do header que o Cloud Run verificou.
+
+    Com X-Serverless-Authorization presente, só ele conta; o Authorization é
+    ignorado, porque nesse caso a plataforma não o conferiu.
+    """
+    serverless = headers.get("x-serverless-authorization")
+    if serverless is not None:
+        return email_from_authorization(serverless, audiences)
+    return email_from_authorization(headers.get("authorization"), audiences)
 
 
 def current_email() -> str | None:
@@ -1081,6 +1249,7 @@ def current_client() -> str | None:
 
 @contextmanager
 def acting_as(email: str | None, client: str | None = "tests") -> Iterator[None]:
+    """Põe a identidade para o bloco e restaura a anterior ao sair."""
     t1, t2 = _email.set(email), _client.set(client)
     try:
         yield
@@ -1090,10 +1259,14 @@ def acting_as(email: str | None, client: str | None = "tests") -> Iterator[None]
 
 
 def middleware(audiences: tuple[str, ...]):
+    """Middleware do servidor MCP que resolve a identidade de cada requisição."""
+
     async def resolve_identity(ctx, call_next):
         request = getattr(ctx, "request", None)
         headers = request.headers if request is not None else {}
-        email = email_from_authorization(headers.get("authorization"), audiences)
+        email = email_from_headers(headers, audiences)
+        # O cliente (User-Agent) é controlado por quem chama: serve só para
+        # telemetria, nunca para autorização.
         with acting_as(email, headers.get("user-agent")):
             return await call_next(ctx)
 
@@ -1113,13 +1286,21 @@ para o agente ler a mensagem e seguir sem o campo.
 from __future__ import annotations
 
 import unicodedata
+from collections.abc import Mapping
 from typing import Any
 
 import mcp.types as t
 
 FORBIDDEN_ARGUMENT_TERMS = (
-    "confidence", "confianca", "expectation", "expectativa", "expected_metric",
-    "expected_magnitude", "resultado_esperado", "magnitude_esperada", "certeza",
+    "confidence",
+    "confianca",
+    "expectation",
+    "expectativa",
+    "expected_metric",
+    "expected_magnitude",
+    "resultado_esperado",
+    "magnitude_esperada",
+    "certeza",
 )
 
 EXPECTATION_REFUSAL = (
@@ -1128,30 +1309,57 @@ EXPECTATION_REFUSAL = (
 
 
 def fold(text: str) -> str:
+    """Minúsculas e sem acento, para `confiança` casar com `confianca`."""
     decomposed = unicodedata.normalize("NFD", text.lower())
     return "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
 
 
 def forbidden_keys(arguments: Any) -> list[str]:
-    if not isinstance(arguments, dict):
-        return []
-    return sorted(
-        str(key) for key in arguments
-        if any(term in fold(str(key)) for term in FORBIDDEN_ARGUMENT_TERMS)
-    )
+    """Caminhos das chaves que carregam confiança ou expectativa, ordenados.
+
+    Desce por dicionários e listas aninhados; olha só chaves, não valores. Chave
+    no topo sai pelo nome (`confidence`); aninhada, pelo caminho
+    (`meta.confidence`, `alternatives[0].expectativa`).
+    """
+    found: set[str] = set()
+
+    def walk(node: Any, prefix: str) -> None:
+        if isinstance(node, Mapping):
+            for key, value in node.items():
+                path = f"{prefix}.{key}" if prefix else str(key)
+                if any(term in fold(str(key)) for term in FORBIDDEN_ARGUMENT_TERMS):
+                    found.add(path)
+                walk(value, path)
+        elif isinstance(node, list | tuple):
+            for index, item in enumerate(node):
+                walk(item, f"{prefix}[{index}]")
+
+    if isinstance(arguments, Mapping):
+        walk(arguments, "")
+    return sorted(found)
 
 
 async def refuse_expectation(ctx, call_next):
-    if ctx.method == "tools/call" and isinstance(ctx.params, dict):
+    """Middleware: recusa `tools/call` com argumento proibido antes da ferramenta."""
+    if ctx.method == "tools/call" and isinstance(ctx.params, Mapping):
         offending = forbidden_keys(ctx.params.get("arguments") or {})
         if offending:
-            text = " ".join((EXPECTATION_REFUSAL, f"Campos recusados: {', '.join(offending)}.",
-                             "Chame de novo sem eles."))
-            return t.CallToolResult(is_error=True, content=[t.TextContent(type="text", text=text)])
+            text = " ".join(
+                (
+                    EXPECTATION_REFUSAL,
+                    f"Campos recusados: {', '.join(offending)}.",
+                    "Chame de novo sem eles.",
+                )
+            )
+            return t.CallToolResult(
+                is_error=True, content=[t.TextContent(type="text", text=text)]
+            )
     return await call_next(ctx)
 ```
 
-**Passo 5: rodar e ver passar.** Esperado: 5 passed.
+**Passo 5: rodar e ver passar.** Esperado: todos passam.
+
+**Passo 5b: `DM_EXPECTED_AUDIENCE` obrigatório no Cloud Run.** Teste em `server/tests_real/test_app_config.py` (com `K_SERVICE` e sem o público, `config.load()` levanta `RuntimeError`) e a checagem em `config.load` — já refletida no bloco da Tarefa 4.
 
 **Passo 6: commit.**
 
@@ -2820,7 +3028,7 @@ chamado por acidente.
 | --- | --- |
 | `DM_DATABASE_URL` | Conexão do `dm_app`. No Cloud Run: `postgresql://dm_app@/decision_memory?host=/cloudsql/<instância>` |
 | `DM_DATABASE_PASSWORD` | Senha do `dm_app`, injetada do Secret Manager |
-| `DM_EXPECTED_AUDIENCE` | URL(s) do serviço, separadas por vírgula; o `aud` do token precisa bater |
+| `DM_EXPECTED_AUDIENCE` | URL(s) do serviço, separadas por vírgula; o `aud` do token precisa bater. Obrigatória no Cloud Run: sem ela o servidor não sobe |
 | `DM_TODAY` | Só para testes: data de referência das revisões vencidas |
 
 ## Deploy
@@ -2852,16 +3060,21 @@ gcloud projects add-iam-policy-binding $PROJECT --member serviceAccount:$SA --ro
 gcloud secrets add-iam-policy-binding dm-app-password --project $PROJECT \
   --member serviceAccount:$SA --role roles/secretmanager.secretAccessor
 
-# 4. Serviço, FECHADO
+# 4. Serviço, FECHADO. O servidor não sobe no Cloud Run sem DM_EXPECTED_AUDIENCE, então
+#    o público vai já no primeiro deploy: a URL determinística do serviço.
+PROJECT_NUMBER=$(gcloud projects describe $PROJECT --format='value(projectNumber)')
+AUDIENCE=https://decision-memory-$PROJECT_NUMBER.$REGION.run.app
 gcloud run deploy decision-memory --source server --project $PROJECT --region $REGION \
   --service-account $SA --no-allow-unauthenticated \
   --add-cloudsql-instances $INSTANCE --min-instances 0 --max-instances 2 \
-  --set-env-vars "DM_DATABASE_URL=postgresql://dm_app@/decision_memory?host=/cloudsql/$INSTANCE" \
+  --set-env-vars "DM_DATABASE_URL=postgresql://dm_app@/decision_memory?host=/cloudsql/$INSTANCE,DM_EXPECTED_AUDIENCE=$AUDIENCE" \
   --set-secrets DM_DATABASE_PASSWORD=dm-app-password:latest
+#    Conferir com as URLs que o Cloud Run de fato atribuiu; se houver outras, aceitar todas.
 URLS=$(gcloud run services describe decision-memory --project $PROJECT --region $REGION \
   --format 'value(status.url,metadata.annotations."run.googleapis.com/urls")' | tr -d '[]"' | tr '\t' ',')
-gcloud run services update decision-memory --project $PROJECT --region $REGION \
-  --update-env-vars "^;^DM_EXPECTED_AUDIENCE=$URLS"
+[ "$URLS" = "$AUDIENCE" ] || \
+  gcloud run services update decision-memory --project $PROJECT --region $REGION \
+    --update-env-vars "^;^DM_EXPECTED_AUDIENCE=$URLS"
 
 # 5. Conferir que está fechado. A identidade depende disso.
 gcloud run services get-iam-policy decision-memory --project $PROJECT --region $REGION \
@@ -2874,7 +3087,9 @@ gcloud run services add-iam-policy-binding decision-memory --project $PROJECT \
 
 **Por que o serviço tem de ficar fechado:** o Cloud Run valida o ID token e o entrega ao
 container sem assinatura. O servidor confia nessa validação. Com o serviço aberto, qualquer um
-forja o e-mail no token e escreve em nome de outra pessoa.
+forja o e-mail no token e escreve em nome de outra pessoa. Mesmo fechado, quando vêm
+`X-Serverless-Authorization` e `Authorization` juntos o Cloud Run só confere o primeiro; por
+isso o servidor, nesse caso, lê a identidade só dele.
 
 ## Verificação manual depois do deploy
 
@@ -2931,8 +3146,10 @@ acrescente ao fim:
 ## Correções durante o plano
 
 - **Identidade:** o Cloud Run entrega o token sem assinatura; não há revalidação com
-  `google-auth`. O servidor lê as claims e confere `aud`. Por isso o serviço fechado é
-  requisito de segurança, verificado no deploy.
+  `google-auth`. O servidor lê as claims e confere `aud` e `iss`. Por isso o serviço fechado é
+  requisito de segurança, verificado no deploy. Com `X-Serverless-Authorization` presente, a
+  identidade vem só dele, o único header que o Cloud Run confere quando vêm os dois.
+  `DM_EXPECTED_AUDIENCE` é obrigatório no Cloud Run e vai já no primeiro deploy.
 - **`provenance.model`:** o `clientInfo` não chega em modo sem estado. Fica `unknown`, e o
   `User-Agent` vai para `source_ref`.
 - **Busca:** `websearch_to_tsquery` exige todos os termos e perguntas em linguagem natural não

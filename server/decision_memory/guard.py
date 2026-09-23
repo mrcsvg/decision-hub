@@ -37,14 +37,28 @@ def fold(text: str) -> str:
 
 
 def forbidden_keys(arguments: Any) -> list[str]:
-    """Chaves de `arguments` que carregam confiança ou expectativa, ordenadas."""
-    if not isinstance(arguments, Mapping):
-        return []
-    return sorted(
-        str(key)
-        for key in arguments
-        if any(term in fold(str(key)) for term in FORBIDDEN_ARGUMENT_TERMS)
-    )
+    """Caminhos das chaves que carregam confiança ou expectativa, ordenados.
+
+    Desce por dicionários e listas aninhados; olha só chaves, não valores. Chave
+    no topo sai pelo nome (`confidence`); aninhada, pelo caminho
+    (`meta.confidence`, `alternatives[0].expectativa`).
+    """
+    found: set[str] = set()
+
+    def walk(node: Any, prefix: str) -> None:
+        if isinstance(node, Mapping):
+            for key, value in node.items():
+                path = f"{prefix}.{key}" if prefix else str(key)
+                if any(term in fold(str(key)) for term in FORBIDDEN_ARGUMENT_TERMS):
+                    found.add(path)
+                walk(value, path)
+        elif isinstance(node, list | tuple):
+            for index, item in enumerate(node):
+                walk(item, f"{prefix}[{index}]")
+
+    if isinstance(arguments, Mapping):
+        walk(arguments, "")
+    return sorted(found)
 
 
 async def refuse_expectation(ctx, call_next):
