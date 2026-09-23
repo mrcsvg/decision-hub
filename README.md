@@ -95,6 +95,7 @@ Este projeto registra as próprias decisões no formato que propõe. Todas estã
 | [0002](docs/adr/0002-mcp-first.md) | Interface MCP-first | Proposto |
 | [0003](docs/adr/0003-normalizar-afirmacao.md) | Normalizar a afirmação, não a estimativa | Proposto |
 | [0004](docs/adr/0004-somente-leitura.md) | Somente leitura sobre as fontes | Proposto |
+| [0005](docs/adr/0005-estado-da-evidencia.md) | O estado da evidência vem da procedência | Proposto |
 
 ## Estado
 
