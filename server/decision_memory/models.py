@@ -1,4 +1,4 @@
-"""Modelos de saída das seis ferramentas do servidor real.
+"""Modelos de saída das oito ferramentas do servidor real.
 
 Mesmo formato de MCP_TOOLS.md: cada ferramenta declara `outputSchema` a partir
 destes modelos e responde com `structuredContent` no formato `{data, pending}`.
@@ -231,4 +231,78 @@ class PendingReviewsData(BaseModel):
 
 class PendingReviewsResponse(BaseModel):
     data: PendingReviewsData
+    pending: Pending
+
+
+class TimelineEvent(BaseModel):
+    on: str = Field(description="Data do evento: decisão, revisão realizada ou registro da lição.")
+    type: str = Field(description="decision, review ou learning")
+    id: str
+    title: str
+    decision_id: str | None = Field(
+        None, description="A decisão do evento; na revisão, a decisão revisada."
+    )
+    slug: str | None = None
+    state: str | None = None
+    door: str | None = None
+    project: str | None = None
+    verdict: str | None = Field(
+        None, description="Só em revisão: better, as_expected, worse ou inconclusive."
+    )
+    notes: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class TimelineData(BaseModel):
+    query: str
+    events: list[TimelineEvent] = Field(default_factory=list)
+    total: int = Field(0, description="Decisões e lições que casaram, antes do limit.")
+    note: str | None = Field(
+        None,
+        description="Aviso quando nada casa, para o agente dizer isso em voz alta.",
+    )
+
+
+class TimelineResponse(BaseModel):
+    data: TimelineData
+    pending: Pending
+
+
+class SharedEvidence(BaseModel):
+    evidence_id: str
+    title: str
+    role_here: str = Field(description="Papel da evidência na decisão de partida.")
+    role_there: str = Field(description="Papel da evidência na decisão relacionada.")
+
+
+class SharedLearning(BaseModel):
+    learning_id: str
+    summary: str
+
+
+class RelatedDecision(BaseModel):
+    decision_id: str
+    slug: str
+    title: str
+    decided_on: str
+    state: str
+    project: str | None = None
+    shared_evidence: list[SharedEvidence] = Field(default_factory=list)
+    shared_learnings: list[SharedLearning] = Field(default_factory=list)
+    shared_tags: list[str] = Field(default_factory=list)
+
+
+class RelatedData(BaseModel):
+    decision_id: str
+    slug: str
+    title: str
+    related: list[RelatedDecision] = Field(default_factory=list)
+    total: int = 0
+    note: str | None = Field(
+        None, description="Aviso quando nenhuma outra decisão se relaciona com esta."
+    )
+
+
+class RelatedResponse(BaseModel):
+    data: RelatedData
     pending: Pending

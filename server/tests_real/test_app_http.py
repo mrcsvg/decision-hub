@@ -102,10 +102,11 @@ def test_initialize(client):
     assert res["serverInfo"]["name"] == "decision-memory"
 
 
-def test_lista_exatamente_as_seis_ferramentas(client):
+def test_lista_exatamente_as_oito_ferramentas(client):
     names = {tool["name"] for tool in rpc(client, "tools/list", {})["tools"]}
     assert names == {"search_evidence", "get_decision", "propose_decision",
-                     "attach_evidence", "record_learning", "list_pending_reviews"}
+                     "attach_evidence", "record_learning", "list_pending_reviews",
+                     "get_topic_timeline", "find_related"}
 
 
 def test_leitura_sem_identidade_funciona(client):
@@ -238,7 +239,7 @@ def test_barra_final_tambem_e_so_post(client):
 
 def test_post_continua_funcionando_depois_do_405(client):
     assert _request_with_deadline(client, "GET").status_code == 405
-    assert len(rpc(client, "tools/list", {})["tools"]) == 6
+    assert len(rpc(client, "tools/list", {})["tools"]) == 8
 
 
 def test_host_fora_de_localhost_e_recusado_fora_do_cloud_run(client):
@@ -252,7 +253,7 @@ def test_no_cloud_run_host_run_app_e_aceito(pool):
     with TestClient(app, base_url="https://decision-memory-teste.a.run.app") as c:
         r = post(c, "tools/list", {})
     assert r.status_code == 200, r.text
-    assert len(r.json()["result"]["tools"]) == 6
+    assert len(r.json()["result"]["tools"]) == 8
 
 
 def test_build_app_fecha_o_pool_ao_desligar(app_url):
@@ -260,7 +261,7 @@ def test_build_app_fecha_o_pool_ao_desligar(app_url):
                              expected_audiences=(AUD,), on_cloud_run=False))
     with TestClient(app, base_url="http://localhost:8080") as c:
         assert not app.state.pool.closed
-        assert len(rpc(c, "tools/list", {})["tools"]) == 6
+        assert len(rpc(c, "tools/list", {})["tools"]) == 8
     assert app.state.pool.closed
 
 

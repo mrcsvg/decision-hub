@@ -22,9 +22,9 @@ def _counts(conn):
 def test_carga_traz_o_corpus_inteiro(admin_conn):
     n = _counts(admin_conn)
     assert n["evidence"] == 12
-    assert n["decision"] == 6
+    assert n["decision"] == 7
     assert n["learning"] == 4
-    assert n["review"] == 5
+    assert n["review"] == 6
     assert n["person"] >= 4
 
 

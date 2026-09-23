@@ -113,7 +113,7 @@ def nul_paths(arguments: Any) -> list[str]:
 async def refuse_nul(ctx, call_next):
     """Middleware: recusa `tools/call` com \\x00 em qualquer texto dos argumentos.
 
-    Vale para as seis ferramentas de uma vez: é na fronteira, antes de qualquer
+    Vale para as oito ferramentas de uma vez: é na fronteira, antes de qualquer
     SQL, que o erro ainda pode ser explicado ao agente.
     """
     if ctx.method == "tools/call" and isinstance(ctx.params, Mapping):
