@@ -234,6 +234,10 @@ def main() -> None:
             load(conn, args.fixtures, attested_by_email=args.attested_by, extra_people=extra)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+    except psycopg.errors.UniqueViolation as exc:
+        detail = exc.diag.message_detail or exc.diag.message_primary
+        raise SystemExit(f"carga desfeita: conflito na chave única "
+                         f"{exc.diag.constraint_name} ({detail})") from exc
     print(f"Carga concluída ({len(extra)} pessoa(s) além das fixtures).")
 
 

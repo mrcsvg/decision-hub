@@ -461,7 +461,9 @@ suíte se recusa a rodar em qualquer outro banco.
 A instância Postgres inteira tem de ser dedicada aos testes: papéis valem para
 o cluster todo, e a suíte aplica grants.sql e troca a senha do papel dm_app.
 Por isso ela também se recusa a rodar fora da máquina local (localhost,
-127.0.0.1, ::1 ou socket Unix).
+127.0.0.1, ::1 ou socket Unix) e, já conectada, antes de mexer em qualquer
+coisa, confere no próprio servidor que a instância só tem bancos *_test e não
+é Cloud SQL — o Auth Proxy escuta em 127.0.0.1 e passaria pela checagem de host.
 """
 
 from __future__ import annotations
@@ -491,6 +493,24 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def _refuse_shared_instance(admin: psycopg.Connection) -> None:
+    """Falha se a instância hospeda outro banco que não de teste, ou se é Cloud SQL."""
+    others = [r[0] for r in admin.execute(
+        "SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'"
+        " AND datname NOT LIKE '%\\_test' ESCAPE '\\' ORDER BY datname"
+    )]
+    if others:
+        pytest.fail(f"a instância de DM_TEST_ADMIN_URL também hospeda {', '.join(others)}; "
+                    "a suíte altera o papel dm_app do cluster e só roda numa instância "
+                    "dedicada a testes (só bancos *_test)")
+    iam = admin.execute(
+        "SELECT current_setting('cloudsql.iam_authentication', true)"
+    ).fetchone()[0]
+    if iam is not None:
+        pytest.fail("DM_TEST_ADMIN_URL aponta para uma instância Cloud SQL (via Auth Proxy?); "
+                    "a suíte só roda num Postgres local dedicado a testes")
+
+
 @pytest.fixture(scope="session")
 def app_url() -> str:
     if not ADMIN_URL:
@@ -507,6 +527,7 @@ def app_url() -> str:
     from decision_memory import seed
 
     with psycopg.connect(ADMIN_URL, autocommit=True) as admin:
+        _refuse_shared_instance(admin)
         admin.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
         admin.execute((ROOT / "db" / "schema.sql").read_text(encoding="utf-8"))
         admin.execute((ROOT / "db" / "grants.sql").read_text(encoding="utf-8"))
@@ -915,6 +936,10 @@ def main() -> None:
             load(conn, args.fixtures, attested_by_email=args.attested_by, extra_people=extra)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+    except psycopg.errors.UniqueViolation as exc:
+        detail = exc.diag.message_detail or exc.diag.message_primary
+        raise SystemExit(f"carga desfeita: conflito na chave única "
+                         f"{exc.diag.constraint_name} ({detail})") from exc
     print(f"Carga concluída ({len(extra)} pessoa(s) além das fixtures).")
 
 
