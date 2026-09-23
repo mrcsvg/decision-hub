@@ -4537,6 +4537,8 @@ Esperado: build conclui. (Rodar o container exige `DM_DATABASE_URL` alcançável
     name: Servidor MCP
     runs-on: ubuntu-latest
 
+    # A suíte recria o schema public e altera o papel dm_app do cluster: a
+    # instância tem de ser dedicada a ela, só com bancos *_test.
     services:
       postgres:
         image: postgres:16
