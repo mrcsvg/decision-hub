@@ -1,6 +1,6 @@
-"""As seis ferramentas de MCP_TOOLS.md, respondendo a partir de fixtures.
+"""As oito ferramentas de MCP_TOOLS.md, respondendo a partir de fixtures.
 
-São seis e não haverá uma sétima sem ADR. As descrições abaixo são as do
+São oito e não haverá uma nona sem ADR (a sétima e a oitava vieram do ADR 0006). As descrições abaixo são as do
 MCP_TOOLS.md, escritas como gatilho ("chame quando…"): é a descrição que faz o
 agente chamar a ferramenta no momento certo, e é justamente isso que este stub
 existe para medir.
@@ -82,6 +82,22 @@ def _pending_sentence(block: models.Pending) -> str:
     if block.on_this_record:
         bits.append("Falta: " + "; ".join(block.on_this_record) + ".")
     return " ".join(bits)
+
+
+# No mesmo dia, a decisão vem antes da revisão, e a revisão antes da lição que
+# ela gerou.
+EVENT_ORDER = {"decision": 0, "review": 1, "learning": 2}
+
+
+def related_order(item: models.RelatedDecision) -> tuple:
+    """Vínculos por evidência e lição, depois por tag, depois a data e o id.
+    Nunca efeito (ADR 0003)."""
+    return (
+        len(item.shared_evidence) + len(item.shared_learnings),
+        len(item.shared_tags),
+        item.decided_on,
+        item.decision_id,
+    )
 
 
 def build_server(corpus: Corpus | None = None) -> MCPServer:
@@ -441,6 +457,247 @@ def build_server(corpus: Corpus | None = None) -> MCPServer:
         )
         return t.CallToolResult(
             content=_text(resumo),
+            structured_content=body.model_dump(mode="json"),
+        )
+
+    @server.tool(
+        name="get_topic_timeline",
+        description=(
+            "Chame quando a pergunta for sobre a trajetória de um tema, e não só sobre o que "
+            'se sabe dele — "já mudamos de ideia sobre isso?", "o que veio antes desta '
+            'decisão?", "como chegamos ao fluxo atual?" — e antes de propor reverter ou '
+            "retomar algo que já foi decidido. Retorna, em ordem cronológica, as decisões "
+            "sobre o tema, as revisões de desfecho e as lições registradas."
+        ),
+        annotations=t.ToolAnnotations(
+            read_only_hint=True, idempotent_hint=True, open_world_hint=False
+        ),
+    )
+    def get_topic_timeline(
+        query: str,
+        tags: list[str] | None = None,
+        limit: int = 20,
+    ) -> Annotated[t.CallToolResult, models.TimelineResponse]:
+        limit = max(1, min(int(limit), 50))
+        wanted_tags = {tag.lower() for tag in (tags or [])}
+        query_tokens = tokenize(query) | {tok for tag in wanted_tags for tok in tokenize(tag)}
+
+        # A seleção é a de search_evidence; só a ordem de saída é a data.
+        scored: list[tuple[float, models.TimelineEvent]] = []
+        for item in corpus.decisions:
+            if wanted_tags and not wanted_tags & set(item.get("tags", [])):
+                continue
+            relevance = score(
+                query_tokens,
+                item["title"],
+                item.get("context", ""),
+                item.get("description", ""),
+                tags=item.get("tags"),
+            )
+            if relevance <= 0:
+                continue
+            project = corpus.project(item.get("project"))
+            scored.append(
+                (
+                    relevance,
+                    models.TimelineEvent(
+                        on=item["decided_on"],
+                        type="decision",
+                        id=item["id"],
+                        title=item["title"],
+                        decision_id=item["id"],
+                        slug=item["slug"],
+                        state=item["state"],
+                        door=item["door"],
+                        project=project["name"] if project else None,
+                        tags=item.get("tags", []),
+                    ),
+                )
+            )
+        for item in corpus.learnings:
+            if wanted_tags and not wanted_tags & set(item.get("tags", [])):
+                continue
+            relevance = score(query_tokens, item["summary"], tags=item.get("tags"))
+            if relevance <= 0:
+                continue
+            scored.append(
+                (
+                    relevance,
+                    models.TimelineEvent(
+                        on=item["recorded_on"],
+                        type="learning",
+                        id=item["id"],
+                        title=item["summary"],
+                        state=item["state"],
+                        tags=item.get("tags", []),
+                    ),
+                )
+            )
+
+        scored.sort(key=lambda row: (row[0], row[1].id), reverse=True)
+        events = [event for _, event in scored[:limit]]
+
+        # Só revisão realizada é evento; a que está por vir é assunto do `pending`.
+        decisions = {event.id: event for event in events if event.type == "decision"}
+        for review in corpus.reviews:
+            decision = decisions.get(review["decision_id"])
+            if decision is None or not review.get("done_on"):
+                continue
+            events.append(
+                models.TimelineEvent(
+                    on=review["done_on"],
+                    type="review",
+                    id=review["id"],
+                    title=decision.title,
+                    decision_id=decision.id,
+                    verdict=review.get("verdict"),
+                    notes=review.get("notes"),
+                    tags=decision.tags,
+                )
+            )
+        events.sort(key=lambda e: (e.on, EVENT_ORDER[e.type], e.id))
+
+        hit_tags = {tag for event in events for tag in event.tags}
+        note = None
+        if not events:
+            note = (
+                "Nada encontrado no registro sobre esse tema. Diga isso explicitamente "
+                "ao usuário em vez de seguir como se não houvesse consultado."
+            )
+        block = pending.build(corpus, context_tags=hit_tags or tokenize(query))
+        body = models.TimelineResponse(
+            data=models.TimelineData(query=query, events=events, total=len(scored), note=note),
+            pending=block,
+        )
+        if events:
+            count = {
+                kind: sum(1 for e in events if e.type == kind)
+                for kind in ("decision", "review", "learning")
+            }
+            resumo = (
+                f"{len(events)} eventos sobre '{query}', de {events[0].on} a {events[-1].on}: "
+                f"{count['decision']} decisão(ões), {count['review']} revisão(ões), "
+                f"{count['learning']} lição(ões)."
+            )
+        else:
+            resumo = f"Nenhum evento para '{query}'."
+        return t.CallToolResult(
+            content=_text(resumo, _pending_sentence(block)),
+            structured_content=body.model_dump(mode="json"),
+        )
+
+    @server.tool(
+        name="find_related",
+        description=(
+            "Chame antes de rever, reverter ou contrariar uma decisão, ou quando alguém "
+            "perguntar o que mais depende dela: lista as outras decisões ligadas a ela por "
+            "evidência em comum — com o papel que a evidência teve em cada uma —, por lição "
+            "em comum ou por tag. É o que mostra quem mais se apoiou nas mesmas premissas."
+        ),
+        annotations=t.ToolAnnotations(
+            read_only_hint=True, idempotent_hint=True, open_world_hint=False
+        ),
+    )
+    def find_related(
+        id: str | None = None, slug: str | None = None, limit: int = 10
+    ) -> Annotated[t.CallToolResult, models.RelatedResponse]:
+        if not id and not slug:
+            raise ToolError("Informe id ou slug da decisão.")
+        decision = corpus.decision_by_id(id) if id else None
+        if decision is None and slug:
+            decision = corpus.decision_by_slug(slug)
+        if decision is None:
+            raise ToolError(
+                f"Decisão não encontrada: {id or slug}. Use search_evidence para localizá-la."
+            )
+        limit = max(1, min(int(limit), 30))
+
+        roles_here = {link["evidence_id"]: link["role"] for link in decision.get("evidence", [])}
+        learnings_here = corpus.learnings_of(decision["id"])
+        tags_here = set(decision.get("tags", []))
+
+        items: list[models.RelatedDecision] = []
+        for other in corpus.decisions:
+            if other["id"] == decision["id"]:
+                continue
+            shared_evidence = []
+            for link in sorted(other.get("evidence", []), key=lambda x: x["evidence_id"]):
+                if link["evidence_id"] not in roles_here:
+                    continue
+                item = corpus.evidence_by_id(link["evidence_id"])
+                shared_evidence.append(
+                    models.SharedEvidence(
+                        evidence_id=link["evidence_id"],
+                        title=item["title"] if item else link["evidence_id"],
+                        role_here=roles_here[link["evidence_id"]],
+                        role_there=link["role"],
+                    )
+                )
+            shared_learnings = [
+                models.SharedLearning(
+                    learning_id=learning_id,
+                    summary=corpus.learning_by_id(learning_id)["summary"],
+                )
+                for learning_id in sorted(learnings_here & corpus.learnings_of(other["id"]))
+                if corpus.learning_by_id(learning_id)
+            ]
+            shared_tags = sorted(tags_here & set(other.get("tags", [])))
+            if not (shared_evidence or shared_learnings or shared_tags):
+                continue
+            project = corpus.project(other.get("project"))
+            items.append(
+                models.RelatedDecision(
+                    decision_id=other["id"],
+                    slug=other["slug"],
+                    title=other["title"],
+                    decided_on=other["decided_on"],
+                    state=other["state"],
+                    project=project["name"] if project else None,
+                    shared_evidence=shared_evidence,
+                    shared_learnings=shared_learnings,
+                    shared_tags=shared_tags,
+                )
+            )
+        items.sort(key=related_order, reverse=True)
+        total = len(items)
+        items = items[:limit]
+
+        note = None
+        if not items:
+            note = (
+                "Nenhuma outra decisão compartilha evidência, lição ou tag com esta. Diga "
+                "isso ao usuário: no registro, ela não tem vizinhas."
+            )
+        block = pending.build(corpus, context_tags=tags_here)
+        body = models.RelatedResponse(
+            data=models.RelatedData(
+                decision_id=decision["id"],
+                slug=decision["slug"],
+                title=decision["title"],
+                related=items,
+                total=total,
+                note=note,
+            ),
+            pending=block,
+        )
+        if items:
+            por_evidencia = sum(1 for i in items if i.shared_evidence)
+            opostas = sum(
+                1
+                for i in items
+                for e in i.shared_evidence
+                if {e.role_here, e.role_there} == {"supports", "contradicts"}
+            )
+            resumo = (
+                f"{decision['title']}: {len(items)} de {total} decisões relacionadas, "
+                f"{por_evidencia} por evidência em comum."
+            )
+            if opostas:
+                resumo += f" {opostas} evidência(s) com papel oposto entre as duas decisões."
+        else:
+            resumo = f"{decision['title']}: nenhuma decisão relacionada."
+        return t.CallToolResult(
+            content=_text(resumo, _pending_sentence(block)),
             structured_content=body.model_dump(mode="json"),
         )
 

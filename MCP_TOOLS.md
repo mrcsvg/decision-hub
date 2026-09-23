@@ -2,7 +2,7 @@
 
 A interface primária do registro é um servidor MCP. Racional em [ADR 0002](docs/adr/0002-mcp-first.md).
 
-São seis ferramentas, e não haverá uma sétima sem ADR. A descrição de cada uma é parte do produto: é ela que faz o agente chamar a ferramenta no momento certo, sem ser pedido. Por isso as descrições abaixo são escritas como **gatilho** ("chame quando…"), não como manual.
+São oito ferramentas, e não haverá uma nona sem ADR. As duas últimas, `get_topic_timeline` e `find_related`, entraram pelo [ADR 0006](docs/adr/0006-linha-do-tempo-e-relacionadas.md). A descrição de cada uma é parte do produto: é ela que faz o agente chamar a ferramenta no momento certo, sem ser pedido. Por isso as descrições abaixo são escritas como **gatilho** ("chame quando…"), não como manual.
 
 ## Regras que valem para todas
 
@@ -107,6 +107,37 @@ Anotações: `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: f
 | `project` | string | não | |
 | `overdue_only` | boolean | não | Padrão `false` |
 | `include_unattested` | boolean | não | Padrão `true` |
+
+Anotações: `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false`.
+
+### `get_topic_timeline`
+
+> Chame quando a pergunta for sobre a trajetória de um tema, e não só sobre o que se sabe dele — "já mudamos de ideia sobre isso?", "o que veio antes desta decisão?", "como chegamos ao fluxo atual?" — e antes de propor reverter ou retomar algo que já foi decidido. Retorna, em ordem cronológica, as decisões sobre o tema, as revisões de desfecho e as lições registradas.
+
+| Parâmetro | Tipo | Obrigatório | Nota |
+| --- | --- | --- | --- |
+| `query` | string | sim | Texto livre, com a mesma regra de relevância de `search_evidence` |
+| `tags` | string[] | não | Filtra pela taxonomia compartilhada |
+| `limit` | int | não | Quantas decisões e lições entram; padrão 20, máximo 50 |
+
+Retorna `events[]` em ordem cronológica. Cada evento tem `on` (data), `type` (`decision`, `review` ou `learning`), `id`, `title`, `decision_id` e `tags`. Decisão traz também `slug`, `state`, `door` e `project`. Revisão traz `verdict` e `notes`, e só entra se já tiver sido realizada. Lição traz `state`. Os outros campos são `total`, com as decisões e lições que casaram antes do `limit`, e `note`, quando nada casa.
+
+A seleção é por relevância, a ordem é por data. Nenhum evento traz confiança ou expectativa, nem de decisão atestada, e evidência não é evento: a data dela é da origem ou da carga, não da mudança de posição ([ADR 0006](docs/adr/0006-linha-do-tempo-e-relacionadas.md)).
+
+Anotações: `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false`.
+
+### `find_related`
+
+> Chame antes de rever, reverter ou contrariar uma decisão, ou quando alguém perguntar o que mais depende dela: lista as outras decisões ligadas a ela por evidência em comum — com o papel que a evidência teve em cada uma —, por lição em comum ou por tag. É o que mostra quem mais se apoiou nas mesmas premissas.
+
+| Parâmetro | Tipo | Obrigatório | Nota |
+| --- | --- | --- | --- |
+| `id` ou `slug` | string | um dos dois | A decisão de partida |
+| `limit` | int | não | Padrão 10, máximo 30 |
+
+Retorna `decision_id`, `slug` e `title` da decisão de partida e `related[]`. Cada item de `related[]` traz `decision_id`, `slug`, `title`, `decided_on`, `state`, `project`, `shared_evidence[]` (`evidence_id`, `title`, `role_here`, `role_there`), `shared_learnings[]` (`learning_id`, `summary`) e `shared_tags[]`. Também vêm `total` e `note`, quando nada se relaciona.
+
+A ordem é pela quantidade de vínculos (evidência e lição contam antes de tag), depois pela data da decisão, a mais recente primeiro. Nunca por efeito.
 
 Anotações: `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false`.
 

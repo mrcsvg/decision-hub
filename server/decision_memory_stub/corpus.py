@@ -107,6 +107,13 @@ class Corpus:
             1 for ln in self.learnings if ln["state"] == "proposed"
         )
 
+    def learnings_of(self, decision_id: str) -> set[str]:
+        """Lições da decisão, vindas dos dois lados do vínculo nas fixtures."""
+        decision = self.decision_by_id(decision_id) or {}
+        return set(decision.get("learnings", [])) | {
+            ln["id"] for ln in self.learnings if decision_id in ln.get("from_decisions", [])
+        }
+
     def tags_of_decision(self, decision_id: str) -> set[str]:
         decision = self.decision_by_id(decision_id)
         return set(decision.get("tags", [])) if decision else set()

@@ -1,6 +1,6 @@
 # Stub do servidor MCP
 
-Responde as seis ferramentas de [`MCP_TOOLS.md`](../MCP_TOOLS.md) a partir de
+Responde as oito ferramentas de [`MCP_TOOLS.md`](../MCP_TOOLS.md) a partir de
 fixtures fictícias. **Não é protótipo de backend.** É o instrumento do item de
 roadmap "testar a invocação das ferramentas em cliente real, antes de existir
 backend" ([concepção](../docs/concepcao.md#próximos-passos)).
@@ -65,19 +65,19 @@ Distribua junto a skill em [`skill/SKILL.md`](skill/SKILL.md): servidor sem skil
 .venv/bin/python -m pytest server/tests -q
 ```
 
-Cobrem o que as regras do projeto exigem: são seis ferramentas e não sete,
+Cobrem o que as regras do projeto exigem: são oito ferramentas e não nove,
 nenhum schema de entrada menciona confiança, a ordem da busca não muda quando os
 efeitos mudam, decisão proposta não devolve expectativa, e o bloco `pending`
 nunca está ausente.
 
 ## O corpus
 
-Fictício, em `fixtures/`: 12 evidências, 6 decisões (uma proposta), 4 lições (uma
-proposta) e 5 revisões (duas vencidas). Os registros de experimento validam
+Fictício, em `fixtures/`: 12 evidências, 7 decisões (uma proposta), 4 lições (uma
+proposta) e 6 revisões (duas vencidas). Os registros de experimento validam
 contra [`spec/experiment-record-v0.schema.json`](../spec/experiment-record-v0.schema.json),
 e a CI reprova se pararem de validar.
 
-Três armadilhas deliberadas, porque um corpus sem elas não testa nada:
+Quatro armadilhas deliberadas, porque um corpus sem elas não testa nada:
 
 - **Evidência contrária.** `ev-checkout-pagina-unica` derrubou a conversão em
   2025. Quem propuser "simplificar o checkout" sem citá-la passou por cima da
@@ -85,6 +85,9 @@ Três armadilhas deliberadas, porque um corpus sem elas não testa nada:
 - **Tema ausente.** Não há nada sobre fidelidade ou assinatura. O agente deve
   dizer que não achou, em voz alta.
 - **Registro não atestado.** `dec-push-diario` está `proposed` e sem expectativa.
+- **Trajetória.** `dec-checkout-pagina-unica` (2025) foi revisada como `worse` e
+  revertida; `dec-remover-confirmacao` (2026) volta ao mesmo checkout apoiada na
+  lição dela. É o que `get_topic_timeline` e `find_related` precisam mostrar.
 
 ## Divergências em relação a `MCP_TOOLS.md`
 

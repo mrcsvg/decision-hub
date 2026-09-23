@@ -9,7 +9,10 @@ from decision_memory import guard
 from decision_memory.server import build_server
 
 EXPECTED_TOOLS = {"search_evidence", "get_decision", "propose_decision",
-                  "attach_evidence", "record_learning", "list_pending_reviews"}
+                  "attach_evidence", "record_learning", "list_pending_reviews",
+                  "get_topic_timeline", "find_related"}
+SOMENTE_LEITURA = {"search_evidence", "get_decision", "list_pending_reviews",
+                   "get_topic_timeline", "find_related"}
 
 
 @pytest.fixture(scope="module")
@@ -23,8 +26,8 @@ def descricoes_do_mcp_tools() -> dict[str, str]:
             for m in re.finditer(r"^### `(\w+)`\n\n> (.+)$", texto, re.MULTILINE)}
 
 
-def test_sao_exatamente_seis_ferramentas(tools):
-    assert set(tools) == EXPECTED_TOOLS, "não crie a sétima ferramenta sem ADR"
+def test_sao_exatamente_oito_ferramentas(tools):
+    assert set(tools) == EXPECTED_TOOLS, "não crie a nona ferramenta sem ADR"
 
 
 def test_descricoes_sao_as_do_mcp_tools(tools):
@@ -39,10 +42,9 @@ def test_toda_ferramenta_declara_output_schema(tools):
 
 
 def test_anotacoes_batem_com_mcp_tools(tools):
-    somente_leitura = {"search_evidence", "get_decision", "list_pending_reviews"}
     for name, tool in tools.items():
         assert tool.annotations.open_world_hint is False, name
-        assert tool.annotations.read_only_hint is (name in somente_leitura), name
+        assert tool.annotations.read_only_hint is (name in SOMENTE_LEITURA), name
 
 
 def test_nenhum_schema_de_entrada_pede_confianca_ou_expectativa(tools):

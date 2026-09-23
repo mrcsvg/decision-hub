@@ -1,4 +1,4 @@
-"""As seis ferramentas de MCP_TOOLS.md sobre o Postgres.
+"""As oito ferramentas de MCP_TOOLS.md sobre o Postgres.
 
 As descrições são cópia literal de MCP_TOOLS.md, e há teste para isso: é a
 descrição que faz o agente chamar a ferramenta na hora certa.
@@ -61,12 +61,34 @@ DESCRIPTIONS = {
         "perguntar o que está pendente: lista decisões cuja revisão de desfecho venceu ou está "
         "próxima, e registros propostos aguardando atestação."
     ),
+    "get_topic_timeline": (
+        "Chame quando a pergunta for sobre a trajetória de um tema, e não só sobre o que se "
+        'sabe dele — "já mudamos de ideia sobre isso?", "o que veio antes desta decisão?", '
+        '"como chegamos ao fluxo atual?" — e antes de propor reverter ou retomar algo que já '
+        "foi decidido. Retorna, em ordem cronológica, as decisões sobre o tema, as revisões de "
+        "desfecho e as lições registradas."
+    ),
+    "find_related": (
+        "Chame antes de rever, reverter ou contrariar uma decisão, ou quando alguém perguntar "
+        "o que mais depende dela: lista as outras decisões ligadas a ela por evidência em "
+        "comum — com o papel que a evidência teve em cada uma —, por lição em comum ou por "
+        "tag. É o que mostra quem mais se apoiou nas mesmas premissas."
+    ),
 }
 
 NOTHING_FOUND = (
     "Nada encontrado no registro sobre esse tema. Diga isso explicitamente ao usuário em vez "
     "de seguir como se não houvesse consultado."
 )
+
+NOTHING_RELATED = (
+    "Nenhuma outra decisão compartilha evidência, lição ou tag com esta. Diga isso ao "
+    "usuário: no registro, ela não tem vizinhas."
+)
+
+# Evidência que sustentou uma decisão e contradisse a outra: o que find_related
+# existe para mostrar.
+OPPOSITE_ROLES = {("supports", "contradicts"), ("contradicts", "supports")}
 
 
 # Consulta ecoada no resumo em texto; o `structured_content` leva a íntegra.
@@ -94,6 +116,19 @@ def _pending_sentence(block: models.Pending) -> str:
 def _result(summary: str, body: Any, block: models.Pending) -> t.CallToolResult:
     return t.CallToolResult(content=_text(summary, _pending_sentence(block)),
                             structured_content=body.model_dump(mode="json"))
+
+
+def _related_summary(title: str, items: list[models.RelatedDecision], total: int) -> str:
+    if not items:
+        return f"{title}: nenhuma decisão relacionada."
+    by_evidence = sum(1 for i in items if i.shared_evidence)
+    opposite = sum(1 for i in items for e in i.shared_evidence
+                   if (e.role_here, e.role_there) in OPPOSITE_ROLES)
+    text = (f"{title}: {len(items)} de {total} decisões relacionadas, "
+            f"{by_evidence} por evidência em comum.")
+    if opposite:
+        text += f" {opposite} evidência(s) com papel oposto entre as duas decisões."
+    return text
 
 
 def with_db(pool: ConnectionPool, work: Callable[[psycopg.Connection], T]) -> T:
@@ -197,6 +232,50 @@ def build_server(pool: ConnectionPool, audiences: tuple[str, ...] = ()) -> MCPSe
             content=_text(summary),
             structured_content=models.PendingReviewsResponse(data=data, pending=block)
             .model_dump(mode="json"))
+
+    @server.tool(name="get_topic_timeline", description=DESCRIPTIONS["get_topic_timeline"],
+                 annotations=READ)
+    def get_topic_timeline(
+        query: str,
+        tags: list[str] | None = None,
+        limit: int = 20,
+    ) -> Annotated[t.CallToolResult, models.TimelineResponse]:
+        def work(conn):
+            events, total = reads.timeline(conn, query, tags, limit)
+            hit_tags = {tag for event in events for tag in event.tags}
+            block = pending.build(conn, context_tags=hit_tags or set(reads.terms(query)))
+            return events, total, block
+
+        events, total, block = with_db(pool, work)
+        body = models.TimelineResponse(
+            data=models.TimelineData(query=query, events=events, total=total,
+                                     note=None if events else NOTHING_FOUND),
+            pending=block)
+        if events:
+            count = {kind: sum(1 for e in events if e.type == kind)
+                     for kind in ("decision", "review", "learning")}
+            summary = (f"{len(events)} eventos sobre '{_echo(query)}', de {events[0].on} a "
+                       f"{events[-1].on}: {count['decision']} decisão(ões), "
+                       f"{count['review']} revisão(ões), {count['learning']} lição(ões).")
+        else:
+            summary = f"Nenhum evento para '{_echo(query)}'."
+        return _result(summary, body, block)
+
+    @server.tool(name="find_related", description=DESCRIPTIONS["find_related"], annotations=READ)
+    def find_related(
+        id: str | None = None, slug: str | None = None, limit: int = 10
+    ) -> Annotated[t.CallToolResult, models.RelatedResponse]:
+        def work(conn):
+            source, items, total = reads.related(conn, id, slug, limit)
+            return source, items, total, pending.build(conn, context_tags=set(source["tags"]))
+
+        source, items, total, block = with_db(pool, work)
+        body = models.RelatedResponse(
+            data=models.RelatedData(decision_id=source["id_text"], slug=source["slug"],
+                                    title=source["title"], related=items, total=total,
+                                    note=None if items else NOTHING_RELATED),
+            pending=block)
+        return _result(_related_summary(source["title"], items, total), body, block)
 
     @server.tool(name="propose_decision", description=DESCRIPTIONS["propose_decision"],
                  annotations=t.ToolAnnotations(idempotent_hint=True, **WRITE))

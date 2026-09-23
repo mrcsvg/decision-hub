@@ -32,10 +32,11 @@ Isso é atestação humana, por princípio do próprio projeto
 
 ## Ferramentas MCP
 
-- São seis. Não crie a sétima sem ADR.
+- São oito ([ADR 0006](docs/adr/0006-linha-do-tempo-e-relacionadas.md)). Não crie a
+  nona sem ADR.
 - Nenhuma ferramenta recebe confiança ou expectativa como parâmetro — nem para
   recusar: o que está no schema de entrada é convite para o agente preencher.
-- O stub em `server/` responde as seis a partir de fixtures. Mudou descrição de
+- O stub em `server/` responde as oito a partir de fixtures. Mudou descrição de
   ferramenta, mude nos dois lugares e diga no PR em que situação o agente
   deixava de chamá-la.
 

@@ -16,7 +16,7 @@ psql -v ON_ERROR_STOP=1 -d <banco_vazio> -f db/schema.sql -f db/grants.sql -f db
 
 ## Ferramentas MCP
 
-São seis, e não haverá uma sétima sem ADR. Melhorias na descrição de uma ferramenta são bem-vindas e contam como mudança de produto: explique no PR em que situação o agente deixava de chamá-la.
+São oito, e não haverá uma nona sem ADR ([ADR 0006](docs/adr/0006-linha-do-tempo-e-relacionadas.md)). Melhorias na descrição de uma ferramenta são bem-vindas e contam como mudança de produto: explique no PR em que situação o agente deixava de chamá-la.
 
 ## Exportadores de plataformas internas
 

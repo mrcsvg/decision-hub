@@ -26,7 +26,7 @@ Existem boas ferramentas para cada tipo de evidência isolado — plataformas de
 
 ## Como funciona
 
-**Interface MCP-first.** Quem escreve e consulta o registro é o agente que já está no fluxo de trabalho — redigindo a proposta, revisando o PR, resumindo a reunião. Seis ferramentas, especificadas em [`MCP_TOOLS.md`](MCP_TOOLS.md). Registros criados por agente nascem como proposta e são atestados por uma pessoa.
+**Interface MCP-first.** Quem escreve e consulta o registro é o agente que já está no fluxo de trabalho — redigindo a proposta, revisando o PR, resumindo a reunião. Oito ferramentas, especificadas em [`MCP_TOOLS.md`](MCP_TOOLS.md). Registros criados por agente nascem como proposta e são atestados por uma pessoa.
 
 **Ingestão contract-first.** Plataformas entregam resultados por um contrato versionado, com três níveis de conformidade. O nível mínimo é o bastante para começar. Especificação em [`spec/`](spec/).
 
@@ -98,13 +98,14 @@ Este projeto registra as próprias decisões no formato que propõe. Todas estã
 | [0003](docs/adr/0003-normalizar-afirmacao.md) | Normalizar a afirmação, não a estimativa | Proposto |
 | [0004](docs/adr/0004-somente-leitura.md) | Somente leitura sobre as fontes | Proposto |
 | [0005](docs/adr/0005-estado-da-evidencia.md) | O estado da evidência vem da procedência | Proposto |
+| [0006](docs/adr/0006-linha-do-tempo-e-relacionadas.md) | Linha do tempo por tema e decisões relacionadas como sétima e oitava ferramentas | Proposto |
 
 ## Estado
 
-v0 — especificação e modelo de dados. Em [`server/`](server/README.md) há um stub que responde as seis ferramentas a partir de fixtures fictícias, para medir se um agente as invoca no momento certo antes de existir backend. Próximos passos em [`docs/concepcao.md`](docs/concepcao.md#próximos-passos).
+v0 — especificação e modelo de dados. Em [`server/`](server/README.md) há um stub que responde as oito ferramentas a partir de fixtures fictícias, para medir se um agente as invoca no momento certo antes de existir backend. Próximos passos em [`docs/concepcao.md`](docs/concepcao.md#próximos-passos).
 
 Há também um servidor de verdade em [`server/decision_memory/`](server/decision_memory/README.md):
-as seis ferramentas sobre o Postgres, feito para o Cloud Run e acessado por IAM. Sem OAuth e sem
+as oito ferramentas sobre o Postgres, feito para o Cloud Run e acessado por IAM. Sem OAuth e sem
 superfície de atestação ainda.
 
 ## Licença

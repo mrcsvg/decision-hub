@@ -15,7 +15,11 @@
 --     para a curva de calibração (confiança declarada x desfecho);
 --   - evidência de todos os tipos e três origens, inclusive contrária, e duas
 --     criadas por agente que ainda aguardam atestação;
---   - lições atestadas e uma proposta.
+--   - lições atestadas e uma proposta;
+--   - duas trajetórias para get_topic_timeline e find_related (ADR 0006): o 3DS
+--     obrigatório de 2025, revertido para o 3DS acima de R$ 800, e o retry de
+--     cartão de abril, que volta em agosto com idempotência. Nas duas, a mesma
+--     evidência sustenta uma decisão e contradiz a outra.
 --
 -- Nada aqui fala de fidelidade ou programa de pontos, de propósito: é o tema
 -- ausente que mostra a busca dizendo "não achei".
@@ -524,5 +528,109 @@ INSERT INTO idempotency_key (principal_person_id, key, object_type, object_id)
 SELECT p.id, 'demo-checkout-convidado', 'decision', 'de000000-0000-4000-8000-000000000011'
   FROM person p WHERE p.email = 'marcus.vggarcia@gmail.com'
 ON CONFLICT DO NOTHING;
+
+-- Trajetórias (ADR 0006) --------------------------------------------------------
+-- Duas decisões novas que só fazem sentido lidas em série. Nenhuma das duas tem
+-- expectativa: estas linhas foram escritas por agente, que não inventa confiança
+-- nem em dado fictício (ADR 0002).
+INSERT INTO decision (id, slug, title, context, description, door, decided_on,
+                      decider_person_id, project_id, state)
+SELECT ('de000000-0000-4000-8000-0000000000' || v.n)::uuid, v.slug, v.title, v.context,
+       v.description, v.door::door_type, v.decided_on::date, p.id, v.project::uuid,
+       v.state::record_state
+  FROM (VALUES
+    ('15', '3ds-em-todos-os-pedidos', 'Exigir 3DS em todos os pedidos com cartão',
+     'Os chargebacks passaram de 0,8% no primeiro semestre de 2025.',
+     'Ativar a autenticação 3DS em todo pedido pago com cartão, num piloto de quatro semanas.',
+     'two_way', '2025-06-02', 'joao@exemplo.com.br', 'bb000000-0000-4000-8000-000000000001', 'attested'),
+    ('16', 'retry-com-idempotencia', 'Voltar com o retry de cartão, com chave de idempotência',
+     'O retry de abril foi revertido por cobrança duplicada, mas o timeout da operadora continua respondendo por uma em cada cinco recusas.',
+     'Religar o retry automático só para cartões recusados por timeout, com chave de idempotência enviada à operadora.',
+     'two_way', '2026-08-18', 'heitor@exemplo.com.br', 'bb000000-0000-4000-8000-000000000001', 'attested')
+  ) AS v(n, slug, title, context, description, door, decided_on, decider, project, state)
+  JOIN person p ON p.email = v.decider
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO decision_tag (decision_id, tag_id)
+SELECT ('de000000-0000-4000-8000-0000000000' || v.n)::uuid, t.id
+  FROM (VALUES ('15', 'pagamentos'), ('15', 'fraude'),
+               ('16', 'pagamentos'), ('16', 'engenharia')) AS v(n, tag)
+  JOIN tag t ON t.name = v.tag
+ON CONFLICT DO NOTHING;
+
+INSERT INTO alternative (id, decision_id, description, rejection_reason)
+SELECT ('af000000-0000-4000-8000-0000000000' || v.n)::uuid,
+       ('de000000-0000-4000-8000-0000000000' || v.d)::uuid, v.description, v.reason
+  FROM (VALUES
+    ('14', '15', '3DS só em cartões internacionais', 'O chargeback vinha também de cartões nacionais.'),
+    ('15', '16', 'Abandonar o retry automático', 'Uma em cada cinco recusas é timeout, e o cliente raramente tenta de novo.')
+  ) AS v(n, d, description, reason)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO evidence (id, kind, title, summary, strength)
+VALUES ('ee000000-0000-4000-8000-000000000020', 'analysis',
+        'Aprovação por faixa de valor no piloto de 3DS',
+        'Com 3DS em todos os pedidos, a aprovação caiu 6 p.p.; quase toda a perda veio de pedidos abaixo de R$ 800, onde o chargeback era residual.',
+        'correlational')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO evidence_tag (evidence_id, tag_id)
+SELECT 'ee000000-0000-4000-8000-000000000020', t.id FROM tag t
+ WHERE t.name IN ('pagamentos', 'fraude')
+ON CONFLICT DO NOTHING;
+
+-- A mesma evidência com papéis opostos: o que find_related existe para mostrar.
+INSERT INTO decision_evidence (decision_id, evidence_id, role, weight, note)
+SELECT ('de000000-0000-4000-8000-0000000000' || v.d)::uuid, v.e::uuid, v.role::evidence_role, v.weight, v.note
+  FROM (VALUES
+    ('15', 'ee000000-0000-4000-8000-000000000020', 'contradicts', 0.9, 'Levantada no piloto; motivou desligar o 3DS obrigatório.'),
+    ('02', 'ee000000-0000-4000-8000-000000000020', 'supports',    0.7, 'É de onde saiu o limite de R$ 800.'),
+    ('16', 'ee000000-0000-4000-8000-000000000003', 'supports',    0.8, 'O incidente mostrou onde faltava idempotência.')
+  ) AS v(d, e, role, weight, note)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO review (id, decision_id, due_on, done_on, verdict, notes, reviewed_by)
+SELECT ('ec000000-0000-4000-8000-0000000000' || v.n)::uuid, d.id, v.due_on::date,
+       v.done_on::date, v.verdict::review_verdict, v.notes,
+       CASE WHEN v.done_on IS NULL THEN NULL ELSE d.decider_person_id END
+  FROM (VALUES
+    ('12', '15', '2025-07-31', '2025-08-04', 'worse', 'A aprovação caiu 6 p.p. em quatro semanas; 3DS obrigatório desligado em 4 de agosto.'),
+    ('13', '16', '2026-11-18', NULL,         NULL,    NULL)
+  ) AS v(n, d, due_on, done_on, verdict, notes)
+  JOIN decision d ON d.id = ('de000000-0000-4000-8000-0000000000' || v.d)::uuid
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO learning (id, summary, recorded_on, state) VALUES
+('ea000000-0000-4000-8000-000000000009',
+ 'Autenticação forte em todo pedido derruba a aprovação; restringir por valor preserva o ganho contra fraude.', '2025-08-05', 'attested')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO decision_learning (decision_id, learning_id)
+SELECT ('de000000-0000-4000-8000-0000000000' || v.d)::uuid, ('ea000000-0000-4000-8000-0000000000' || v.l)::uuid
+  FROM (VALUES ('15', '09'), ('02', '09'), ('16', '02')) AS v(d, l)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO evidence_learning (evidence_id, learning_id)
+VALUES ('ee000000-0000-4000-8000-000000000020', 'ea000000-0000-4000-8000-000000000009')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO learning_tag (learning_id, tag_id)
+SELECT 'ea000000-0000-4000-8000-000000000009', t.id FROM tag t
+ WHERE t.name IN ('pagamentos', 'fraude')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO provenance (object_type, object_id, author_kind, principal_person_id, source_ref,
+                        attested_by, attested_at)
+SELECT v.object_type, v.object_id::uuid, 'human', pr.id, 'demo', pr.id, v.attested_at::timestamptz
+  FROM (VALUES
+    ('decision', 'de000000-0000-4000-8000-000000000015', 'joao@exemplo.com.br',   '2025-06-02 10:00-03'),
+    ('decision', 'de000000-0000-4000-8000-000000000016', 'heitor@exemplo.com.br', '2026-08-18 10:00-03'),
+    ('evidence', 'ee000000-0000-4000-8000-000000000020', 'fabio@exemplo.com.br',  '2025-08-04 09:00-03'),
+    ('learning', 'ea000000-0000-4000-8000-000000000009', 'joao@exemplo.com.br',   '2025-08-05 10:00-03')
+  ) AS v(object_type, object_id, principal, attested_at)
+  JOIN person pr ON pr.email = v.principal
+ WHERE NOT EXISTS (SELECT 1 FROM provenance p
+                    WHERE p.object_type = v.object_type AND p.object_id = v.object_id::uuid
+                      AND p.source_ref = 'demo');
 
 COMMIT;

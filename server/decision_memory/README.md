@@ -1,6 +1,6 @@
 # Servidor MCP
 
-As seis ferramentas de [`MCP_TOOLS.md`](../../MCP_TOOLS.md) sobre o Postgres. Design em
+As oito ferramentas de [`MCP_TOOLS.md`](../../MCP_TOOLS.md) sobre o Postgres. Design em
 [`docs/plans/2026-09-23-servidor-mcp-gcp-design.md`](../../docs/plans/2026-09-23-servidor-mcp-gcp-design.md).
 
 Não confundir com o [stub](../README.md), que responde a partir de fixtures e existe para o
@@ -223,6 +223,6 @@ curl -s localhost:8080/mcp \
   distinguir o intervalo de confiança da confiança da pessoa abriria a porta. Só chaves; valor
   com o termo passa.
 - **Argumentos**: texto com caractere nulo (`\x00`) é recusado antes da ferramenta, em
-  qualquer das seis; o Postgres não guarda esse caractere.
+  qualquer das oito; o Postgres não guarda esse caractere.
 - **GET /mcp responde 405: sem sessão, não há fluxo SSE do servidor.** DELETE também, como
   qualquer método que não seja POST (`Allow: POST`): não há sessão a encerrar.

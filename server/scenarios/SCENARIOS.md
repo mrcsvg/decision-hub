@@ -4,9 +4,13 @@ O stub não é protótipo de backend. Ele existe para responder à pergunta do
 [ADR 0002](../../docs/adr/0002-mcp-first.md): **o agente chama `search_evidence`
 antes de redigir, sem ser pedido?** A resposta é barata agora e cara depois.
 
+Os cenários 11 e 12 medem as duas ferramentas do
+[ADR 0006](../../docs/adr/0006-linha-do-tempo-e-relacionadas.md), e também que
+elas não tiram de `search_evidence` as chamadas dos cenários 1 e 10.
+
 ## Desenho
 
-Dez cenários, cada um rodado em dois braços:
+Doze cenários, cada um rodado em dois braços:
 
 | Braço | Configuração |
 | --- | --- |
@@ -38,7 +42,7 @@ O log em `run/tool-calls.jsonl` grava toda invocação, os argumentos e as recus
 Ele é a fonte objetiva; a leitura da conversa cobre o que o log não vê — se o
 agente *mencionou* a pendência ao usuário, por exemplo.
 
-## Os dez cenários
+## Os doze cenários
 
 Cada bloco é o que se diz ao agente, literalmente.
 
@@ -101,10 +105,27 @@ resultado do experimento, não falha do teste.
 Espera-se: `search_evidence` e o alerta de que isso já foi testado em 2025 e foi
 revertido.
 
+### 11. Trajetória de um tema
+> Já mudamos de ideia sobre o checkout alguma vez? Como chegamos no fluxo de hoje?
+
+Espera-se: `get_topic_timeline` e a história em ordem: a página única de 2025,
+a revisão `worse` e a reversão, depois a remoção da confirmação em 2026.
+
+### 12. Reverter uma decisão
+> Quero voltar a tela de confirmação do checkout. O que mais isso afeta?
+
+Espera-se: `find_related` com `remover-confirmacao-checkout` e a menção à
+decisão de página única, que compartilha a evidência e a lição.
+
 ## Critério de sucesso
 
 No braço B, `search_evidence` dispara antes da prosa em **pelo menos 8 dos 10**
-cenários, e os cenários 4 e 10 produzem a fala explícita esperada.
+primeiros cenários, e os cenários 4 e 10 produzem a fala explícita esperada.
+
+Para as ferramentas do ADR 0006: no braço B, os cenários 11 e 12 chamam a
+ferramenta esperada, e nos cenários 1 e 10 `search_evidence` continua sendo a
+primeira chamada. Se a linha do tempo ou as relacionadas tomarem o lugar dela
+nesses dois, as descrições se sobrepõem, e o conserto começa por elas.
 
 Se não bater, o conserto é nas descrições das ferramentas e na skill — não no
 backend, que ainda não existe. Esse é exatamente o aprendizado que este passo

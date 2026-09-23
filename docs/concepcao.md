@@ -380,7 +380,7 @@ Como efeito secundário, o escopo inicial cai pela metade: não há frontend a c
 
 ### Superfície de ferramentas
 
-Seis, no máximo. A descrição de cada uma é parte do produto, não documentação acessória — é ela que determina se o agente chama a ferramenta no momento certo.
+Seis, no máximo, na concepção; o [ADR 0006](adr/0006-linha-do-tempo-e-relacionadas.md) subiu para oito. A descrição de cada uma é parte do produto, não documentação acessória — é ela que determina se o agente chama a ferramenta no momento certo.
 
 | Ferramenta | Função |
 | --- | --- |
@@ -390,6 +390,8 @@ Seis, no máximo. A descrição de cada uma é parte do produto, não documenta�
 | `attach_evidence` | Vincula evidência a uma decisão, com papel e peso |
 | `record_learning` | Registra lição de experimento ou de revisão |
 | `list_pending_reviews` | Revisões vencidas; alimenta o lembrete embutido |
+| `get_topic_timeline` | Trajetória de um tema em ordem cronológica ([ADR 0006](adr/0006-linha-do-tempo-e-relacionadas.md)) |
+| `find_related` | Decisões que compartilham evidência, lição ou tag com uma decisão ([ADR 0006](adr/0006-linha-do-tempo-e-relacionadas.md)) |
 
 ### O risco central: a invocação não é controlada
 
