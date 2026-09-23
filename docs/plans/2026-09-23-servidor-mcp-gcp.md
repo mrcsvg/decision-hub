@@ -412,8 +412,9 @@ from datetime import date
 class Settings:
     database_url: str
     database_password: str | None
-    # Públicos aceitos no ID token (a URL do serviço). Vazio desliga a checagem,
-    # o que só é permitido fora do Cloud Run.
+    # Públicos aceitos no ID token (a URL do serviço), além do cliente OAuth do
+    # gcloud (identity.GCLOUD_CLIENT_ID). Vazio desliga a checagem, o que só é
+    # permitido fora do Cloud Run.
     expected_audiences: tuple[str, ...]
     on_cloud_run: bool
 
@@ -1051,6 +1052,7 @@ from conftest import run
 
 from decision_memory.guard import forbidden_keys, nul_paths, refuse_nul
 from decision_memory.identity import (
+    GCLOUD_CLIENT_ID,
     acting_as,
     current_client,
     current_email,
@@ -1091,6 +1093,21 @@ def test_payload_ilegivel_nao_ha_identidade():
 
 def test_publico_errado_nao_ha_identidade():
     assert email_from_authorization(token({"email": "a@b.c", "aud": "https://outro"}), (AUD,)) is None
+
+
+def test_publico_do_cliente_do_gcloud_e_aceito():
+    """O token que o gcloud emite para conta de usuário (proxy, print-identity-token)
+    traz como aud o id do cliente OAuth do próprio gcloud, não a URL do serviço."""
+    assert GCLOUD_CLIENT_ID == "32555940559.apps.googleusercontent.com"
+    claims = {"email": "ana@x.com", "aud": GCLOUD_CLIENT_ID, "azp": GCLOUD_CLIENT_ID,
+              "email_verified": True}
+    assert email_from_authorization(token(claims), (AUD,)) == "ana@x.com"
+    assert email_from_headers({"authorization": token(claims)}, (AUD,)) == "ana@x.com"
+
+
+def test_outro_cliente_oauth_nao_e_aceito():
+    claims = {"email": "ana@x.com", "aud": "123-outro.apps.googleusercontent.com"}
+    assert email_from_authorization(token(claims), (AUD,)) is None
 
 
 def test_publico_em_lista():
@@ -1231,6 +1248,10 @@ token do Google e repassa o header ao container SEM a assinatura
 revalidar: o servidor confia na validação da plataforma, lê as claims e confere
 público e emissor. Isso só é seguro com o serviço fechado — ver README, "Deploy".
 
+O público aceito é a URL do serviço (DM_EXPECTED_AUDIENCE) ou o cliente OAuth
+do gcloud (GCLOUD_CLIENT_ID): é esse o `aud` do token de conta de usuário que
+o `gcloud run services proxy` injeta.
+
 Qual header a plataforma validou: se vierem `X-Serverless-Authorization` e
 `Authorization`, o Cloud Run confere SÓ o primeiro e repassa o segundo intacto
 (https://docs.cloud.google.com/run/docs/authenticating/service-to-service).
@@ -1258,23 +1279,35 @@ _client: ContextVar[str | None] = ContextVar("dm_client", default=None)
 
 GOOGLE_ISSUERS = ("accounts.google.com", "https://accounts.google.com")
 
+# Id público do cliente OAuth do gcloud CLI. O ID token que o gcloud emite para
+# conta de usuário — o do `gcloud run services proxy` e o de `gcloud auth
+# print-identity-token` — traz esse id como `aud` (e como `azp`), não a URL do
+# serviço; sem ele na lista, toda pessoa pelo proxy ficaria sem identidade. O
+# Cloud Run já conferiu o público na borda, antes de a requisição chegar aqui:
+# esta checagem no servidor é defesa em profundidade, não a barreira.
+GCLOUD_CLIENT_ID = "32555940559.apps.googleusercontent.com"
+
 
 def _audience_ok(aud: object, audiences: tuple[str, ...]) -> bool:
-    """`aud` de um JWT pode ser string ou lista; basta um elemento conferir."""
+    """`aud` de um JWT pode ser string ou lista; basta um elemento conferir.
+
+    Com `audiences` configurado, vale também o cliente do gcloud.
+    """
     if not audiences:
         return True
+    accepted = (*audiences, GCLOUD_CLIENT_ID)
     if isinstance(aud, str):
-        return aud in audiences
+        return aud in accepted
     if isinstance(aud, list):
-        return any(isinstance(a, str) and a in audiences for a in aud)
+        return any(isinstance(a, str) and a in accepted for a in aud)
     return False
 
 
 def email_from_authorization(header: str | None, audiences: tuple[str, ...]) -> str | None:
     """E-mail do ID token no header, ou None se não houver identidade aceitável.
 
-    Sem `audiences` configurado, o público não é conferido. O emissor tem de
-    ser o Google sempre.
+    Sem `audiences` configurado, o público não é conferido; com ele, vale
+    também GCLOUD_CLIENT_ID. O emissor tem de ser o Google sempre.
     """
     if not header or not header.lower().startswith("bearer "):
         return None
@@ -4356,7 +4389,7 @@ chamado por acidente.
 | --- | --- |
 | `DM_DATABASE_URL` | Conexão do `dm_app`. No Cloud Run: `postgresql://dm_app@/decision_memory?host=/cloudsql/<instância>` |
 | `DM_DATABASE_PASSWORD` | Senha do `dm_app`, injetada do Secret Manager |
-| `DM_EXPECTED_AUDIENCE` | URL(s) do serviço, separadas por vírgula; o `aud` do token precisa bater. Obrigatória no Cloud Run: sem ela o servidor não sobe. Fora do Cloud Run, vazia desliga a checagem de `aud` |
+| `DM_EXPECTED_AUDIENCE` | URL(s) do serviço, separadas por vírgula; o `aud` do token precisa bater com uma delas ou com o cliente OAuth do gcloud (`32555940559.apps.googleusercontent.com`, ver "Verificação manual"). Obrigatória no Cloud Run: sem ela o servidor não sobe. Fora do Cloud Run, vazia desliga a checagem de `aud` |
 | `DM_TODAY` | Só para testes: data de referência das revisões vencidas |
 
 O servidor escuta em `$PORT` (o Cloud Run define), ou 8080. Cada comando SQL tem teto de 5 s,
@@ -4439,14 +4472,23 @@ gcloud run services add-iam-policy-binding decision-memory --project $PROJECT \
 
 **Por que o serviço tem de ficar fechado:** o Cloud Run valida o ID token e o entrega ao
 container sem assinatura. O servidor confia nessa validação: lê as claims e confere só `aud`
-(contra `DM_EXPECTED_AUDIENCE`) e `iss` (o Google). Com o serviço aberto, qualquer um forja o
+(contra `DM_EXPECTED_AUDIENCE` e o cliente do gcloud) e `iss` (o Google). Com o serviço aberto, qualquer um forja o
 e-mail no token e escreve em nome de outra pessoa. Mesmo fechado, quando vêm
 `X-Serverless-Authorization` e `Authorization` juntos o Cloud Run só confere o primeiro; por
 isso o servidor, nesse caso, lê a identidade só dele, e nunca cai para o `Authorization`.
 
 ## Verificação manual depois do deploy
 
-Não há teste automático contra o GCP. Com o proxy do `gcloud run services proxy` no ar:
+Não há teste automático contra o GCP.
+
+O token que o proxy injeta é o da sua conta de usuário no gcloud, e o `aud` dele **não** é a
+URL do serviço: é `32555940559.apps.googleusercontent.com`, o id público do cliente OAuth do
+gcloud (o mesmo de `gcloud auth print-identity-token`; `iss` é `https://accounts.google.com`).
+O Cloud Run aceita esse token e confere o público na borda; o servidor aceita esse `aud` além
+das URLs de `DM_EXPECTED_AUDIENCE`, como defesa em profundidade. Token de conta de serviço,
+emitido com `--audiences`, traz a URL do serviço.
+
+Com o proxy do `gcloud run services proxy` no ar:
 
 ```bash
 curl -s localhost:8080/mcp \
@@ -4456,9 +4498,9 @@ curl -s localhost:8080/mcp \
 
 1. A resposta traz "Checkout em página única" — leitura e conexão por socket funcionam.
 2. No Claude Code, peça para registrar uma decisão de teste. Deve voltar `state: proposed`.
-   Se voltar "Não consegui identificar sua conta", o token não chegou ou o `aud` não bateu:
-   veja nos logs do serviço e ajuste `DM_EXPECTED_AUDIENCE`. Se voltar "Sua conta não está
-   cadastrada", falta o e-mail em `person`.
+   Se voltar "Não consegui identificar sua conta", o token não chegou ou foi recusado (`aud`
+   fora de `DM_EXPECTED_AUDIENCE` e do cliente do gcloud, ou `iss` que não é o Google). Se
+   voltar "Sua conta não está cadastrada", falta o e-mail em `person`.
 3. Em `get_decision` da decisão de teste, `provenance.principal` é o seu nome.
 
 ## Divergências em relação a `MCP_TOOLS.md`

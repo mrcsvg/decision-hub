@@ -9,6 +9,7 @@ from conftest import run
 
 from decision_memory.guard import forbidden_keys, nul_paths, refuse_nul
 from decision_memory.identity import (
+    GCLOUD_CLIENT_ID,
     acting_as,
     current_client,
     current_email,
@@ -49,6 +50,21 @@ def test_payload_ilegivel_nao_ha_identidade():
 
 def test_publico_errado_nao_ha_identidade():
     assert email_from_authorization(token({"email": "a@b.c", "aud": "https://outro"}), (AUD,)) is None
+
+
+def test_publico_do_cliente_do_gcloud_e_aceito():
+    """O token que o gcloud emite para conta de usuário (proxy, print-identity-token)
+    traz como aud o id do cliente OAuth do próprio gcloud, não a URL do serviço."""
+    assert GCLOUD_CLIENT_ID == "32555940559.apps.googleusercontent.com"
+    claims = {"email": "ana@x.com", "aud": GCLOUD_CLIENT_ID, "azp": GCLOUD_CLIENT_ID,
+              "email_verified": True}
+    assert email_from_authorization(token(claims), (AUD,)) == "ana@x.com"
+    assert email_from_headers({"authorization": token(claims)}, (AUD,)) == "ana@x.com"
+
+
+def test_outro_cliente_oauth_nao_e_aceito():
+    claims = {"email": "ana@x.com", "aud": "123-outro.apps.googleusercontent.com"}
+    assert email_from_authorization(token(claims), (AUD,)) is None
 
 
 def test_publico_em_lista():

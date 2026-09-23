@@ -11,8 +11,9 @@ from datetime import date
 class Settings:
     database_url: str
     database_password: str | None
-    # Públicos aceitos no ID token (a URL do serviço). Vazio desliga a checagem,
-    # o que só é permitido fora do Cloud Run.
+    # Públicos aceitos no ID token (a URL do serviço), além do cliente OAuth do
+    # gcloud (identity.GCLOUD_CLIENT_ID). Vazio desliga a checagem, o que só é
+    # permitido fora do Cloud Run.
     expected_audiences: tuple[str, ...]
     on_cloud_run: bool
 

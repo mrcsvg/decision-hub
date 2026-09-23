@@ -28,7 +28,7 @@ chamado por acidente.
 | --- | --- |
 | `DM_DATABASE_URL` | Conexão do `dm_app`. No Cloud Run: `postgresql://dm_app@/decision_memory?host=/cloudsql/<instância>` |
 | `DM_DATABASE_PASSWORD` | Senha do `dm_app`, injetada do Secret Manager |
-| `DM_EXPECTED_AUDIENCE` | URL(s) do serviço, separadas por vírgula; o `aud` do token precisa bater. Obrigatória no Cloud Run: sem ela o servidor não sobe. Fora do Cloud Run, vazia desliga a checagem de `aud` |
+| `DM_EXPECTED_AUDIENCE` | URL(s) do serviço, separadas por vírgula; o `aud` do token precisa bater com uma delas ou com o cliente OAuth do gcloud (`32555940559.apps.googleusercontent.com`, ver "Verificação manual"). Obrigatória no Cloud Run: sem ela o servidor não sobe. Fora do Cloud Run, vazia desliga a checagem de `aud` |
 | `DM_TODAY` | Só para testes: data de referência das revisões vencidas |
 
 O servidor escuta em `$PORT` (o Cloud Run define), ou 8080. Cada comando SQL tem teto de 5 s,
@@ -111,14 +111,23 @@ gcloud run services add-iam-policy-binding decision-memory --project $PROJECT \
 
 **Por que o serviço tem de ficar fechado:** o Cloud Run valida o ID token e o entrega ao
 container sem assinatura. O servidor confia nessa validação: lê as claims e confere só `aud`
-(contra `DM_EXPECTED_AUDIENCE`) e `iss` (o Google). Com o serviço aberto, qualquer um forja o
+(contra `DM_EXPECTED_AUDIENCE` e o cliente do gcloud) e `iss` (o Google). Com o serviço aberto, qualquer um forja o
 e-mail no token e escreve em nome de outra pessoa. Mesmo fechado, quando vêm
 `X-Serverless-Authorization` e `Authorization` juntos o Cloud Run só confere o primeiro; por
 isso o servidor, nesse caso, lê a identidade só dele, e nunca cai para o `Authorization`.
 
 ## Verificação manual depois do deploy
 
-Não há teste automático contra o GCP. Com o proxy do `gcloud run services proxy` no ar:
+Não há teste automático contra o GCP.
+
+O token que o proxy injeta é o da sua conta de usuário no gcloud, e o `aud` dele **não** é a
+URL do serviço: é `32555940559.apps.googleusercontent.com`, o id público do cliente OAuth do
+gcloud (o mesmo de `gcloud auth print-identity-token`; `iss` é `https://accounts.google.com`).
+O Cloud Run aceita esse token e confere o público na borda; o servidor aceita esse `aud` além
+das URLs de `DM_EXPECTED_AUDIENCE`, como defesa em profundidade. Token de conta de serviço,
+emitido com `--audiences`, traz a URL do serviço.
+
+Com o proxy do `gcloud run services proxy` no ar:
 
 ```bash
 curl -s localhost:8080/mcp \
@@ -128,9 +137,9 @@ curl -s localhost:8080/mcp \
 
 1. A resposta traz "Checkout em página única" — leitura e conexão por socket funcionam.
 2. No Claude Code, peça para registrar uma decisão de teste. Deve voltar `state: proposed`.
-   Se voltar "Não consegui identificar sua conta", o token não chegou ou o `aud` não bateu:
-   veja nos logs do serviço e ajuste `DM_EXPECTED_AUDIENCE`. Se voltar "Sua conta não está
-   cadastrada", falta o e-mail em `person`.
+   Se voltar "Não consegui identificar sua conta", o token não chegou ou foi recusado (`aud`
+   fora de `DM_EXPECTED_AUDIENCE` e do cliente do gcloud, ou `iss` que não é o Google). Se
+   voltar "Sua conta não está cadastrada", falta o e-mail em `person`.
 3. Em `get_decision` da decisão de teste, `provenance.principal` é o seu nome.
 
 ## Divergências em relação a `MCP_TOOLS.md`

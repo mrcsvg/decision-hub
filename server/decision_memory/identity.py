@@ -6,6 +6,10 @@ token do Google e repassa o header ao container SEM a assinatura
 revalidar: o servidor confia na validação da plataforma, lê as claims e confere
 público e emissor. Isso só é seguro com o serviço fechado — ver README, "Deploy".
 
+O público aceito é a URL do serviço (DM_EXPECTED_AUDIENCE) ou o cliente OAuth
+do gcloud (GCLOUD_CLIENT_ID): é esse o `aud` do token de conta de usuário que
+o `gcloud run services proxy` injeta.
+
 Qual header a plataforma validou: se vierem `X-Serverless-Authorization` e
 `Authorization`, o Cloud Run confere SÓ o primeiro e repassa o segundo intacto
 (https://docs.cloud.google.com/run/docs/authenticating/service-to-service).
@@ -33,23 +37,35 @@ _client: ContextVar[str | None] = ContextVar("dm_client", default=None)
 
 GOOGLE_ISSUERS = ("accounts.google.com", "https://accounts.google.com")
 
+# Id público do cliente OAuth do gcloud CLI. O ID token que o gcloud emite para
+# conta de usuário — o do `gcloud run services proxy` e o de `gcloud auth
+# print-identity-token` — traz esse id como `aud` (e como `azp`), não a URL do
+# serviço; sem ele na lista, toda pessoa pelo proxy ficaria sem identidade. O
+# Cloud Run já conferiu o público na borda, antes de a requisição chegar aqui:
+# esta checagem no servidor é defesa em profundidade, não a barreira.
+GCLOUD_CLIENT_ID = "32555940559.apps.googleusercontent.com"
+
 
 def _audience_ok(aud: object, audiences: tuple[str, ...]) -> bool:
-    """`aud` de um JWT pode ser string ou lista; basta um elemento conferir."""
+    """`aud` de um JWT pode ser string ou lista; basta um elemento conferir.
+
+    Com `audiences` configurado, vale também o cliente do gcloud.
+    """
     if not audiences:
         return True
+    accepted = (*audiences, GCLOUD_CLIENT_ID)
     if isinstance(aud, str):
-        return aud in audiences
+        return aud in accepted
     if isinstance(aud, list):
-        return any(isinstance(a, str) and a in audiences for a in aud)
+        return any(isinstance(a, str) and a in accepted for a in aud)
     return False
 
 
 def email_from_authorization(header: str | None, audiences: tuple[str, ...]) -> str | None:
     """E-mail do ID token no header, ou None se não houver identidade aceitável.
 
-    Sem `audiences` configurado, o público não é conferido. O emissor tem de
-    ser o Google sempre.
+    Sem `audiences` configurado, o público não é conferido; com ele, vale
+    também GCLOUD_CLIENT_ID. O emissor tem de ser o Google sempre.
     """
     if not header or not header.lower().startswith("bearer "):
         return None

@@ -146,7 +146,10 @@ O que a implementação mudou em relação ao texto acima. O detalhe de cada pon
   (Google). Por isso o serviço fechado é requisito de segurança, verificado no deploy. Com
   `X-Serverless-Authorization` presente, a identidade vem só dele, o único header que o Cloud
   Run confere quando vêm os dois. `DM_EXPECTED_AUDIENCE` é obrigatório no Cloud Run e vai já no
-  primeiro deploy.
+  primeiro deploy. O token de conta de usuário que o `gcloud run services proxy` injeta traz
+  como `aud` o cliente OAuth do gcloud (`32555940559.apps.googleusercontent.com`), não a URL do
+  serviço; o servidor aceita esse `aud` além das URLs configuradas. O Cloud Run já conferiu o
+  público na borda: a checagem no servidor é defesa em profundidade.
 - **`provenance.model`:** o `clientInfo` não chega em modo sem estado. Fica `unknown`, e o
   `User-Agent` vai para `source_ref`.
 - **Busca:** `websearch_to_tsquery` exige todos os termos e perguntas em linguagem natural não
