@@ -69,7 +69,9 @@ Os cinco abaixo são exatamente o que a CI roda
 ### Invariantes do banco
 
 Precisa de um PostgreSQL 16 vazio. As invariantes rodam numa transação desfeita
-ao final.
+ao final; `schema.sql` e `grants.sql`, não — o `dropdb` leva o banco, mas o papel
+`dm_app` é do cluster e fica, assim como o `REVOKE CREATE ON SCHEMA public FROM
+PUBLIC` fica no banco em que rodou, se ele for reaproveitado (o do Docker abaixo).
 
 ```bash
 createdb decision_memory_test
