@@ -341,7 +341,7 @@ CREATE TABLE idempotency_key (
     principal_person_id  uuid        NOT NULL REFERENCES person (id),
     key                  text        NOT NULL CHECK (key <> ''),
     object_type          text        NOT NULL CHECK (object_type IN ('decision')),
-    object_id            uuid        NOT NULL,
+    object_id            uuid        NOT NULL,  -- sem FK: polimórfico por object_type (hoje só 'decision')
     created_at           timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (principal_person_id, key)
 );

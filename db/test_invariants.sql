@@ -150,8 +150,86 @@ DO $$ BEGIN
 EXCEPTION WHEN insufficient_privilege THEN NULL;
 END $$;
 
--- e acrescenta o que as ferramentas precisam
-INSERT INTO tag (name) VALUES ('papel-dm-app');
+-- Nem atesta o que escreve: atestação é humana (ADR 0002). As colunas de
+-- atestação, estado e importação ficam fora do INSERT concedido.
+DO $$ BEGIN
+    INSERT INTO provenance (object_type, object_id, author_kind, principal_person_id,
+                            model, attested_by, attested_at)
+    VALUES ('decision', '00000000-0000-0000-0000-0000000000d1', 'agent',
+            '00000000-0000-0000-0000-000000000001', 'modelo',
+            '00000000-0000-0000-0000-000000000001', now());
+    RAISE EXCEPTION 'FALHOU: dm_app atestou procedência';
+EXCEPTION WHEN insufficient_privilege THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    INSERT INTO decision (slug, title, description, decided_on, decider_person_id, state)
+    VALUES ('autoatestada', 'Autoatestada', 'x', '2025-06-01',
+            '00000000-0000-0000-0000-000000000001', 'attested');
+    RAISE EXCEPTION 'FALHOU: dm_app gravou decisão já atestada';
+EXCEPTION WHEN insufficient_privilege THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    INSERT INTO learning (summary, state) VALUES ('Autoatestada', 'attested');
+    RAISE EXCEPTION 'FALHOU: dm_app gravou lição já atestada';
+EXCEPTION WHEN insufficient_privilege THEN NULL;
+END $$;
+
+-- Nenhuma escrita nas tabelas de cadastro e de atestação humana, e nenhum
+-- UPDATE, DELETE ou TRUNCATE em tabela alguma. has_any_column_privilege pega
+-- também o privilégio concedido por coluna.
+DO $$
+DECLARE
+    t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['expectation', 'review', 'person', 'assignment', 'project',
+                             'job_title', 'org_area', 'indicator', 'measurement'] LOOP
+        ASSERT NOT has_any_column_privilege('dm_app', t, 'INSERT, UPDATE')
+           AND NOT has_table_privilege('dm_app', t, 'DELETE, TRUNCATE'),
+            format('FALHOU: dm_app pode escrever em %s', t);
+    END LOOP;
+    FOR t IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+        ASSERT NOT has_any_column_privilege('dm_app', t, 'UPDATE')
+           AND NOT has_table_privilege('dm_app', t, 'DELETE, TRUNCATE'),
+            format('FALHOU: dm_app pode alterar ou apagar em %s', t);
+    END LOOP;
+    ASSERT NOT has_schema_privilege('dm_app', 'public', 'CREATE'),
+        'FALHOU: dm_app pode criar objetos no schema public';
+END $$;
+
+-- e acrescenta o que as ferramentas precisam, só nas colunas concedidas
+DO $$
+DECLARE
+    v_job_title uuid;
+BEGIN
+    INSERT INTO decision (slug, title, description, decided_on, decider_person_id)
+    VALUES ('proposta-por-agente', 'Proposta por agente', 'x', '2025-06-01',
+            '00000000-0000-0000-0000-000000000001')
+    RETURNING job_title_at_decision INTO v_job_title;
+    ASSERT v_job_title = '00000000-0000-0000-0000-0000000000a2',
+        'decisão inserida por dm_app deveria registrar o cargo de 2025 (Diretora)';
+END $$;
+
+INSERT INTO provenance (object_type, object_id, author_kind, principal_person_id, model, source_ref)
+VALUES ('decision', '00000000-0000-0000-0000-0000000000d1', 'agent',
+        '00000000-0000-0000-0000-000000000001', 'modelo', 'mcp');
+
+INSERT INTO tag (name) VALUES ('papel-dm-app') ON CONFLICT (name) DO NOTHING;
+INSERT INTO tag (name) VALUES ('papel-dm-app') ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO decision_tag (decision_id, tag_id)
+SELECT '00000000-0000-0000-0000-0000000000d1', id FROM tag WHERE name = 'papel-dm-app'
+ON CONFLICT DO NOTHING;
+INSERT INTO decision_tag (decision_id, tag_id)
+SELECT '00000000-0000-0000-0000-0000000000d1', id FROM tag WHERE name = 'papel-dm-app'
+ON CONFLICT DO NOTHING;
+
+DO $$ BEGIN
+    ASSERT (SELECT count(*) FROM decision_tag dt JOIN tag t ON t.id = dt.tag_id
+             WHERE t.name = 'papel-dm-app') = 1,
+        'reenvio de tag deveria ser ignorado, não duplicado';
+END $$;
 
 RESET ROLE;
 

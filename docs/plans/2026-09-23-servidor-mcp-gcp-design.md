@@ -61,16 +61,22 @@ sem senha no arquivo):
 | Permissão | Tabelas |
 | --- | --- |
 | `SELECT` | todas |
-| `INSERT` | `decision`, `alternative`, `evidence`, `decision_evidence`, `learning`, `decision_learning`, `evidence_learning`, `tag`, `decision_tag`, `evidence_tag`, `learning_tag`, `provenance`, `idempotency_key` |
+| `INSERT` (tabela) | `alternative`, `decision_evidence`, `decision_learning`, `evidence_learning`, `tag`, `decision_tag`, `evidence_tag`, `learning_tag`, `idempotency_key` |
+| `INSERT` (colunas) | `provenance` (`object_type`, `object_id`, `author_kind`, `principal_person_id`, `model`, `source_ref`); `decision` (`slug`, `title`, `context`, `description`, `door`, `decided_on`, `decider_person_id`, `project_id`); `learning` (`summary`, `recorded_on`); `evidence` (`kind`, `title`, `summary`, `url`, `source_system`, `external_id`, `strength`) |
 | nenhuma escrita | `expectation`, `review`, `person`, `assignment`, `project`, `job_title`, `org_area`, `indicator`, `measurement` |
-| `UPDATE`, `DELETE` | nenhuma |
+| `UPDATE`, `DELETE`, `TRUNCATE` | nenhuma |
+| `CREATE` no schema `public` | nenhum (`REVOKE CREATE ON SCHEMA public FROM PUBLIC`, que só faz diferença no PostgreSQL 14) |
 
 O servidor só acrescenta. "Nenhuma ferramenta escreve expectativa" passa a ser
-garantido pelo banco.
+garantido pelo banco. O INSERT por coluna impede que o servidor ateste o que
+escreve (ADR 0002): `attested_by`/`attested_at`, `state` e o vínculo na data da
+decisão ficam de fora, assim como as colunas de importação da evidência. Que
+`author_kind` seja `agent`, e não `human` ou `import`, continua a cargo do servidor.
 
 **Invariantes novas** em `db/test_invariants.sql`, sob `SET ROLE dm_app`: inserir em
-`expectation` e `review`, `UPDATE` em `decision` e `DELETE` em `evidence` falham com
-`insufficient_privilege`. Mais o teste da `idempotency_key`.
+`expectation` e `review`, `UPDATE` em `decision`, `DELETE` em `evidence` e INSERT
+com colunas de atestação (`provenance.attested_at`, `state = 'attested'` em
+`decision` e `learning`) falham com `insufficient_privilege`. Mais o teste da `idempotency_key`.
 
 **Tabela `idempotency_key`**, aditiva: chave `(principal_person_id, key)`, mais
 `object_type`, `object_id`, `created_at`.
