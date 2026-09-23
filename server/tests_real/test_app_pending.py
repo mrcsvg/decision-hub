@@ -99,7 +99,8 @@ def test_hint_so_cita_tag_compartilhada_com_revisao_vencida(pool):
     with pool.connection() as conn:
         checkout = pending.build(conn, context_tags={"checkout"})
         frete = pending.build(conn, context_tags={"frete"})
-    assert "relacionada à tag checkout" in checkout.hint
+    # Duas revisões vencidas no corpus: a concordância segue o plural.
+    assert "revisões vencidas relacionadas à tag checkout" in checkout.hint
     # frete tem revisão em aberto, mas não vencida: citar a tag enganaria o agente.
     assert "tag" not in frete.hint
     assert "Mencione ao usuário" in frete.hint
@@ -108,6 +109,7 @@ def test_hint_so_cita_tag_compartilhada_com_revisao_vencida(pool):
 def test_hint_singular_e_plural():
     one = [ReviewDue(decision_id="a", title="A", due_on="2026-09-01", overdue_days=21)]
     assert "1 revisão vencida." in pending._hint(one, 0, set())
+    assert "1 revisão vencida relacionada à tag checkout." in pending._hint(one, 0, {"checkout"})
     assert "2 revisões vencidas" in pending._hint(one * 2, 0, set())
 
 

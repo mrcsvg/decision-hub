@@ -1802,8 +1802,9 @@ def _hint(due: list[ReviewDue], unattested: int, shared_tags: set[str]) -> str |
     """
     if due:
         tag = next(iter(sorted(shared_tags)), None)
-        escopo = f" relacionada à tag {tag}" if tag else ""
-        plural = "revisões vencidas" if len(due) > 1 else "revisão vencida"
+        many = len(due) > 1
+        escopo = f" {'relacionadas' if many else 'relacionada'} à tag {tag}" if tag else ""
+        plural = "revisões vencidas" if many else "revisão vencida"
         return f"Há {len(due)} {plural}{escopo}. Mencione ao usuário antes de prosseguir."
     if unattested:
         return (
