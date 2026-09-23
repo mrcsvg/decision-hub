@@ -43,7 +43,8 @@ Existem boas ferramentas para cada tipo de evidência isolado — plataformas de
 │   └── examples/
 ├── db/
 │   ├── schema.sql                     modelo lógico em PostgreSQL
-│   └── test_invariants.sql
+│   ├── test_invariants.sql
+│   └── migrations/                    o que schema.sql ganhou, para banco já criado
 └── server/                            stub MCP sobre fixtures, para testar invocação
 ```
 

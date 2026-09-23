@@ -98,6 +98,19 @@ DO $$ BEGIN
         'busca textual em decision não encontrou o registro';
 END $$;
 
+-- 8. Chave de idempotência é única por pessoa ---------------------------------
+INSERT INTO idempotency_key (principal_person_id, key, object_type, object_id)
+VALUES ('00000000-0000-0000-0000-000000000001', 'k1', 'decision',
+        '00000000-0000-0000-0000-0000000000d1');
+
+DO $$ BEGIN
+    INSERT INTO idempotency_key (principal_person_id, key, object_type, object_id)
+    VALUES ('00000000-0000-0000-0000-000000000001', 'k1', 'decision',
+            '00000000-0000-0000-0000-0000000000d1');
+    RAISE EXCEPTION 'FALHOU: chave de idempotência repetida foi aceita';
+EXCEPTION WHEN unique_violation THEN NULL;
+END $$;
+
 \echo 'Todas as invariantes passaram.'
 
 ROLLBACK;
