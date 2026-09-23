@@ -57,6 +57,31 @@ psql -v ON_ERROR_STOP=1 -d decision_memory -f db/test_invariants.sql
 
 Requer PostgreSQL 14 ou superior com a extensão `btree_gist`. Os testes rodam numa transação desfeita ao final e verificam as invariantes que o banco garante sozinho: expectativa append-only e anterior ao desfecho, vínculo organizacional na data da decisão, vigências sem sobreposição e ingestão idempotente.
 
+### Instância no Cloud SQL
+
+Há uma instância com o schema carregado no projeto `ufpr-ppgcd` do Google Cloud
+(`decision-memory`, PostgreSQL 16, `southamerica-east1`). O acesso é pelo
+[Cloud SQL Auth Proxy](https://cloud.google.com/sql/docs/postgres/sql-proxy);
+a instância não aceita conexão direta pelo IP público. Deixe o proxy rodando
+enquanto usar o banco:
+
+```bash
+gcloud auth application-default login   # uma vez
+cloud-sql-proxy --port 5433 ufpr-ppgcd:southamerica-east1:decision-memory
+```
+
+Com o proxy no ar, conecte no DBeaver, psql ou outro cliente com:
+
+| Campo    | Valor             |
+| -------- | ----------------- |
+| Host     | `127.0.0.1`       |
+| Porta    | `5433`            |
+| Database | `decision_memory` |
+| Usuário  | `dm_admin`        |
+| SSL      | desligado; o proxy já criptografa a conexão |
+
+A senha não fica no repositório. Peça a quem administra o projeto.
+
 ## Decisões de arquitetura
 
 Este projeto registra as próprias decisões no formato que propõe. Todas estão como **Proposto** até serem atestadas por quem decide, e a expectativa de cada uma é preenchida por pessoa, nunca por agente.
