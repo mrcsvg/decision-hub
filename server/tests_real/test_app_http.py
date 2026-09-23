@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 
 import pytest
 from conftest import ANA
@@ -189,6 +190,32 @@ def test_caractere_nulo_e_recusado(client, admin_conn):
     assert res["isError"] is True
     assert NUL_REFUSAL in text(res)
     assert "title" in text(res)
+
+
+def _request_with_deadline(client, method, seconds=5.0):
+    """Faz a requisição numa thread; None se ela não voltar no prazo."""
+    box = {}
+    worker = threading.Thread(
+        target=lambda: box.update(r=client.request(method, "/mcp", headers=HEADERS)),
+        daemon=True)
+    worker.start()
+    worker.join(seconds)
+    return box.get("r")
+
+
+@pytest.mark.parametrize("method", ["GET", "DELETE"])
+def test_get_e_delete_respondem_405_sem_pendurar(client, method):
+    # Sem sessão não há fluxo SSE do servidor nem sessão a encerrar. Antes, o GET
+    # abria um stream que nunca fechava.
+    r = _request_with_deadline(client, method)
+    assert r is not None, f"{method} /mcp não respondeu em 5 s"
+    assert r.status_code == 405
+    assert r.headers["allow"] == "POST"
+
+
+def test_post_continua_funcionando_depois_do_405(client):
+    assert _request_with_deadline(client, "GET").status_code == 405
+    assert len(rpc(client, "tools/list", {})["tools"]) == 6
 
 
 def test_host_fora_de_localhost_e_recusado_fora_do_cloud_run(client):
