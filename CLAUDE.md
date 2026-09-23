@@ -5,9 +5,10 @@ Superfície MCP em [`MCP_TOOLS.md`](MCP_TOOLS.md), contrato de ingestão em
 [`spec/README.md`](spec/README.md). Leia antes de mudar qualquer coisa. Não
 repita o conteúdo deles aqui.
 
-Estado: v0, especificação e modelo de dados. Não há servidor: o que existe em
-[`server/`](server/README.md) é um stub sobre fixtures, andaime para medir se o
-agente chama as ferramentas na hora certa. O que vem depois está em
+Estado: v0, especificação e modelo de dados. Em [`server/`](server/README.md)
+há um stub sobre fixtures, andaime para medir se o agente chama as ferramentas
+na hora certa, e o servidor sobre o Postgres, em
+[`server/decision_memory/`](server/decision_memory/README.md). O que vem depois está em
 [Próximos passos](docs/concepcao.md#próximos-passos) — não antecipe etapa sem
 combinar.
 

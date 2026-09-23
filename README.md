@@ -46,7 +46,9 @@ Existem boas ferramentas para cada tipo de evidência isolado — plataformas de
 │   ├── grants.sql                     papel dm_app do servidor MCP: só lê e acrescenta
 │   ├── test_invariants.sql
 │   └── migrations/                    o que schema.sql ganhou, para banco já criado
-└── server/                            stub MCP sobre fixtures, para testar invocação
+└── server/
+    ├── decision_memory_stub/          stub MCP sobre fixtures, para testar invocação
+    └── decision_memory/               servidor MCP sobre Postgres, para o Cloud Run
 ```
 
 ## Rodar o schema
@@ -99,7 +101,11 @@ Este projeto registra as próprias decisões no formato que propõe. Todas estã
 
 ## Estado
 
-v0 — especificação e modelo de dados. Sem servidor implementado ainda: o que há em [`server/`](server/README.md) é um stub que responde as seis ferramentas a partir de fixtures fictícias, para medir se um agente as invoca no momento certo antes de existir backend. Próximos passos em [`docs/concepcao.md`](docs/concepcao.md#próximos-passos).
+v0 — especificação e modelo de dados. Em [`server/`](server/README.md) há um stub que responde as seis ferramentas a partir de fixtures fictícias, para medir se um agente as invoca no momento certo antes de existir backend. Próximos passos em [`docs/concepcao.md`](docs/concepcao.md#próximos-passos).
+
+Há também um servidor de verdade em [`server/decision_memory/`](server/decision_memory/README.md):
+as seis ferramentas sobre o Postgres, feito para o Cloud Run e acessado por IAM. Sem OAuth e sem
+superfície de atestação ainda.
 
 ## Licença
 

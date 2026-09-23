@@ -135,3 +135,32 @@ Registradas no README do servidor:
 - IAM em vez de OAuth 2.1.
 - `attest_url` nulo; atestação fora do corte.
 - `provenance.model` vem do `clientInfo`, não do modelo.
+
+## Correções durante o plano
+
+O que a implementação mudou em relação ao texto acima. O detalhe de cada ponto está no
+[README do servidor](../../server/decision_memory/README.md).
+
+- **Identidade:** o Cloud Run entrega o token sem assinatura; não há revalidação com
+  `google-auth` nem verificador injetado. O servidor lê as claims e confere `aud` e `iss`
+  (Google). Por isso o serviço fechado é requisito de segurança, verificado no deploy. Com
+  `X-Serverless-Authorization` presente, a identidade vem só dele, o único header que o Cloud
+  Run confere quando vêm os dois. `DM_EXPECTED_AUDIENCE` é obrigatório no Cloud Run e vai já no
+  primeiro deploy.
+- **`provenance.model`:** o `clientInfo` não chega em modo sem estado. Fica `unknown`, e o
+  `User-Agent` vai para `source_ref`.
+- **Busca:** `websearch_to_tsquery` exige todos os termos e perguntas em linguagem natural não
+  achariam nada. Termos em OR, no máximo 32, com a regra de relevância do stub portada. Acento
+  e caixa são ignorados dobrando o texto com `translate()` na consulta, o que deixa o índice
+  GIN de `search` sem uso; radical continua não tratado.
+- **Carga:** `python -m decision_memory.seed`, ids uuid5 das fixtures, em vez de
+  `scripts/load_fixtures.py`.
+- **Banco:** `INSERT` por coluna em `provenance`, `decision`, `learning` e `evidence` (tabela
+  da seção 2). Todo comando SQL e a espera por conexão do pool têm teto de 5 s.
+- **`attach_evidence`:** agente não cria evidência com `source_system`/`external_id`, de
+  qualquer tipo; identidade de origem entra só pela ingestão. Par já existente é reaproveitado.
+- **`propose_decision`:** devolve `reused`; com `idempotency_key` já usada, volta o registro
+  gravado e o conteúdo da chamada nova não é aplicado.
+- **Entrada:** tags de escrita seguem o padrão do contrato (`^[a-z0-9][a-z0-9 _./-]*$`); texto
+  com `\x00` é recusado em qualquer ferramenta.
+- **Transporte:** só POST em `/mcp`; GET, DELETE e os demais respondem 405 com `Allow: POST`.
