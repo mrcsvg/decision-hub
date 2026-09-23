@@ -130,3 +130,8 @@ jobs:
       # Schema, grants e fixtures são aplicados do zero pela própria suíte.
       - name: Rodar os testes do servidor
         run: python -m pytest server/tests_real -q
+
+      # A imagem que vai ao Cloud Run (gcloud run deploy --source server) tem de
+      # construir; o build pega Dockerfile, requirements e .dockerignore quebrados.
+      - name: Construir a imagem do servidor
+        run: docker build -t decision-memory:ci server

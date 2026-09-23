@@ -4449,6 +4449,11 @@ Esperado: build conclui. (Rodar o container exige `DM_DATABASE_URL` alcançável
       # Schema, grants e fixtures são aplicados do zero pela própria suíte.
       - name: Rodar os testes do servidor
         run: python -m pytest server/tests_real -q
+
+      # A imagem que vai ao Cloud Run (gcloud run deploy --source server) tem de
+      # construir; o build pega Dockerfile, requirements e .dockerignore quebrados.
+      - name: Construir a imagem do servidor
+        run: docker build -t decision-memory:ci server
 ```
 
 **Passo 4: CLAUDE.md.** Em "Rodar os testes", troque "Os quatro abaixo" por "Os cinco abaixo"
