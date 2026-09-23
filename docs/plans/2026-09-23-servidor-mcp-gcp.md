@@ -2592,9 +2592,13 @@ git commit -m "feat(server): ferramentas de leitura sobre o Postgres"
 ```python
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 from conftest import ANA, run
 
+from decision_memory import writes
 from decision_memory.identity import acting_as
 from decision_memory.seed import fid
 from decision_memory.server import build_server
@@ -2610,24 +2614,60 @@ def call(server, name, args, as_email=ANA):
         return run(server.call_tool(name, args))
 
 
+# Títulos com "zeppelin" não casam com nenhuma consulta dos testes de leitura.
 PROPOSTA = {
-    "title": "Adotar entrega no mesmo dia na capital",
-    "description": "Entregar no mesmo dia para pedidos até as 14h.",
+    "title": "Adotar entrega zeppelin no mesmo dia",
+    "description": "Entregar no mesmo dia para pedidos até as 14h (teste-escrita).",
     "decider_email": ANA,
 }
 
 
+def proposta(server, title: str, **extra) -> str:
+    res = call(server, "propose_decision", {**PROPOSTA, "title": title, **extra})
+    return res.structured_content["data"]["decision_id"]
+
+
+def count(admin_conn, sql: str, *params) -> int:
+    return admin_conn.execute(sql, params).fetchone()[0]
+
+
 def test_proposta_nasce_proposed_e_lista_o_que_falta(server, admin_conn):
-    data = call(server, "propose_decision", PROPOSTA).structured_content["data"]
+    res = call(server, "propose_decision", PROPOSTA).structured_content
+    data = res["data"]
     assert data["state"] == "proposed"
     assert data["attest_url"] is None
     assert set(data["missing"]) == {"alternatives", "evidence", "context"}
-    kind, model, principal = admin_conn.execute(
-        "SELECT pv.author_kind::text, pv.model, p.email FROM provenance pv "
-        "JOIN person p ON p.id = pv.principal_person_id "
+    assert len(res["pending"]["on_this_record"]) == 3
+    kind, model, principal, ref, attested = admin_conn.execute(
+        "SELECT pv.author_kind::text, pv.model, p.email, pv.source_ref, pv.attested_at "
+        "FROM provenance pv JOIN person p ON p.id = pv.principal_person_id "
         "WHERE pv.object_type = 'decision' AND pv.object_id = %s", (data["decision_id"],)
     ).fetchone()
     assert (kind, model, principal) == ("agent", "unknown", ANA)
+    assert ref == "mcp; client=tests"
+    assert attested is None
+    state = admin_conn.execute("SELECT state::text FROM decision WHERE id = %s",
+                               (data["decision_id"],)).fetchone()[0]
+    assert state == "proposed"
+
+
+def test_proposta_completa_grava_alternativas_tags_e_evidencia(server, admin_conn):
+    did = proposta(
+        server, "Decisão zeppelin completa", context="Pedidos atrasavam na capital.",
+        alternatives=[{"description": "Entrega em dois dias",
+                       "rejection_reason": "Perde para a concorrência."}],
+        tags=["  Teste-Escrita ", "", "ZEPPELIN", "zeppelin", "Conversão"],
+        evidence=[{"evidence_id": str(fid("ev-checkout-confirm")), "role": "supports",
+                   "weight": 0.5}],
+    )
+    tags = {r[0] for r in admin_conn.execute(
+        "SELECT t.name FROM decision_tag x JOIN tag t ON t.id = x.tag_id "
+        "WHERE x.decision_id = %s", (did,))}
+    assert tags == {"teste-escrita", "zeppelin", "conversao"}
+    assert count(admin_conn, "SELECT count(*) FROM alternative WHERE decision_id = %s", did) == 1
+    role = admin_conn.execute("SELECT role::text FROM decision_evidence WHERE decision_id = %s",
+                              (did,)).fetchone()[0]
+    assert role == "supports"
 
 
 def test_sem_identidade_nao_escreve(server):
@@ -2644,72 +2684,148 @@ def test_conta_nao_cadastrada_nao_escreve(server):
 
 def test_decisor_desconhecido_nao_cria_registro(server, admin_conn):
     with pytest.raises(Exception) as excinfo:
-        call(server, "propose_decision", {**PROPOSTA, "title": "Decisão fantasma",
+        call(server, "propose_decision", {**PROPOSTA, "title": "Decisão zeppelin fantasma",
                                           "decider_email": "ninguem@exemplo.com"})
-    assert "Pessoa não encontrada" in str(excinfo.value)
-    assert admin_conn.execute(
-        "SELECT count(*) FROM decision WHERE title = 'Decisão fantasma'").fetchone()[0] == 0
+    assert str(excinfo.value).endswith(
+        "Pessoa não encontrada. Confirme o e-mail com o usuário; o registro não foi criado.")
+    assert count(admin_conn, "SELECT count(*) FROM decision "
+                             "WHERE title = 'Decisão zeppelin fantasma'") == 0
+
+
+def test_data_invalida_explica_o_formato(server):
+    with pytest.raises(Exception) as excinfo:
+        call(server, "propose_decision", {**PROPOSTA, "decided_on": "ontem"})
+    assert "AAAA-MM-DD" in str(excinfo.value)
 
 
 def test_erro_no_meio_desfaz_tudo(server, admin_conn):
-    with pytest.raises(Exception):
+    with pytest.raises(Exception) as excinfo:
         call(server, "propose_decision", {
-            **PROPOSTA, "title": "Decisão com evidência inválida",
+            **PROPOSTA, "title": "Decisão zeppelin com evidência inválida",
+            "tags": ["zeppelin-desfeito"],
+            "alternatives": [{"description": "a", "rejection_reason": "b"}],
             "evidence": [{"evidence_id": "00000000-0000-0000-0000-000000000000",
                           "role": "supports"}]})
-    assert admin_conn.execute(
-        "SELECT count(*) FROM decision WHERE title = 'Decisão com evidência inválida'"
-    ).fetchone()[0] == 0
+    assert "Evidência não encontrada" in str(excinfo.value)
+    assert count(admin_conn, "SELECT count(*) FROM decision "
+                             "WHERE title = 'Decisão zeppelin com evidência inválida'") == 0
+    assert count(admin_conn, "SELECT count(*) FROM tag WHERE name = 'zeppelin-desfeito'") == 0
 
 
-def test_idempotency_key_devolve_o_mesmo_registro(server):
-    args = {**PROPOSTA, "title": "Decisão idempotente", "idempotency_key": "k-123"}
+def test_idempotency_key_devolve_o_mesmo_registro(server, admin_conn):
+    args = {**PROPOSTA, "title": "Decisão zeppelin idempotente", "idempotency_key": "k-123"}
     a = call(server, "propose_decision", args).structured_content["data"]
     b = call(server, "propose_decision", args).structured_content["data"]
     assert a["decision_id"] == b["decision_id"]
+    assert count(admin_conn, "SELECT count(*) FROM decision "
+                             "WHERE title = 'Decisão zeppelin idempotente'") == 1
+
+
+def test_idempotency_key_concorrente_nao_duplica_nem_falha(server, admin_conn, monkeypatch):
+    """Duas chamadas simultâneas, mesma pessoa e chave: um registro, mesma resposta.
+
+    O atraso em `_slug` abre a janela entre conferir a chave e gravá-la; sem o
+    advisory lock, as duas passariam pela conferência e a segunda cairia na
+    chave primária de idempotency_key.
+    """
+    slug = writes._slug
+
+    def slow_slug(conn, title):
+        time.sleep(0.3)
+        return slug(conn, title)
+
+    monkeypatch.setattr(writes, "_slug", slow_slug)
+    args = {**PROPOSTA, "title": "Decisão zeppelin concorrente", "idempotency_key": "k-corrida"}
+    barrier = threading.Barrier(2)
+    results: list = [None, None]
+
+    def worker(i: int) -> None:
+        barrier.wait()
+        try:
+            results[i] = call(server, "propose_decision", args).structured_content["data"]
+        except Exception as exc:  # noqa: BLE001 - o teste compara o que voltou
+            results[i] = exc
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert all(isinstance(r, dict) for r in results), results
+    assert results[0]["decision_id"] == results[1]["decision_id"]
+    assert count(admin_conn, "SELECT count(*) FROM decision "
+                             "WHERE title = 'Decisão zeppelin concorrente'") == 1
 
 
 def test_slug_repetido_ganha_sufixo(server):
-    a = call(server, "propose_decision", {**PROPOSTA, "title": "Título repetido"})
-    b = call(server, "propose_decision", {**PROPOSTA, "title": "Título repetido"})
-    assert a.structured_content["data"]["slug"] != b.structured_content["data"]["slug"]
+    a = call(server, "propose_decision", {**PROPOSTA, "title": "Título zeppelin repetido"})
+    b = call(server, "propose_decision", {**PROPOSTA, "title": "Título zeppelin repetido"})
+    sa, sb = (r.structured_content["data"]["slug"] for r in (a, b))
+    assert sa != sb
+    assert sa.startswith("titulo-zeppelin-repetido") and sb.startswith("titulo-zeppelin-repetido-")
 
 
-def test_evidencia_ja_existente_e_reaproveitada(server):
-    dec = call(server, "propose_decision", {**PROPOSTA, "title": "Decisão para anexar"})
-    did = dec.structured_content["data"]["decision_id"]
+def test_evidencia_ja_existente_e_reaproveitada(server, admin_conn):
+    did = proposta(server, "Decisão zeppelin para anexar")
+    antes = count(admin_conn, "SELECT count(*) FROM evidence")
     data = call(server, "attach_evidence", {
         "decision_id": did, "role": "contradicts",
         "evidence": {"kind": "experiment", "title": "outro título", "strength": "causal",
                      "source_system": "internal.lab", "external_id": "exp-2025-0311"},
     }).structured_content["data"]
     assert data["reused_existing"] is True
+    assert data["already_linked"] is False
+    assert data["role"] == "contradicts"
     assert data["evidence_id"] == str(fid("ev-checkout-pagina-unica"))
+    assert count(admin_conn, "SELECT count(*) FROM evidence") == antes
 
 
-def test_evidencia_nova_de_agente_aparece_proposta_na_busca(server):
-    dec = call(server, "propose_decision", {**PROPOSTA, "title": "Decisão com evidência nova"})
-    did = dec.structured_content["data"]["decision_id"]
+def test_evidencia_nova_de_agente_aparece_proposta_na_busca(server, admin_conn):
+    did = proposta(server, "Decisão zeppelin com evidência nova")
     data = call(server, "attach_evidence", {
         "decision_id": did, "role": "supports",
-        "evidence": {"kind": "analysis", "title": "Análise de entregas zeppelin",
+        "evidence": {"kind": "analysis", "title": "Análise de entregas dirigivel",
                      "strength": "correlational"},
+    }).structured_content
+    assert data["data"]["state"] == "proposed"
+    assert data["data"]["reused_existing"] is False
+    assert data["pending"]["on_this_record"] == [
+        "Só há evidência favorável registrada até agora: houve algo que contradisse a escolha?"]
+    kind = admin_conn.execute(
+        "SELECT author_kind::text FROM provenance WHERE object_type = 'evidence' "
+        "AND object_id = %s", (data["data"]["evidence_id"],)).fetchone()[0]
+    assert kind == "agent"
+    busca = call(server, "search_evidence", {"query": "dirigivel"}).structured_content["data"]
+    achados = {i["id"]: i["state"] for i in busca["items"]}
+    assert achados[data["data"]["evidence_id"]] == "proposed"
+
+
+def test_experimento_sem_origem_entra_por_agente(server):
+    did = proposta(server, "Decisão zeppelin com experimento informal")
+    data = call(server, "attach_evidence", {
+        "decision_id": did, "role": "contradicts",
+        "evidence": {"kind": "experiment", "title": "Teste zeppelin de corredor",
+                     "strength": "anecdotal", "url": "https://exemplo.com/planilha"},
     }).structured_content["data"]
     assert data["state"] == "proposed"
-    busca = call(server, "search_evidence", {"query": "zeppelin"}).structured_content["data"]
-    assert [i["state"] for i in busca["items"]] == ["proposed"]
+    assert data["reused_existing"] is False
 
 
-def test_vinculo_repetido_nao_muda_nada(server):
+def test_vinculo_repetido_nao_muda_nada(server, admin_conn):
     did = str(fid("dec-remover-confirmacao"))
+    eid = str(fid("ev-checkout-confirm"))
     data = call(server, "attach_evidence", {
-        "decision_id": did, "role": "discarded", "evidence_id": str(fid("ev-checkout-confirm")),
+        "decision_id": did, "role": "discarded", "evidence_id": eid, "weight": 0.1,
     }).structured_content["data"]
     assert data["already_linked"] is True
     assert data["role"] == "supports", "o papel original não pode ser trocado por agente"
+    role, weight = admin_conn.execute(
+        "SELECT role::text, weight FROM decision_evidence WHERE decision_id = %s "
+        "AND evidence_id = %s", (did, eid)).fetchone()
+    assert (role, float(weight)) == ("supports", 0.9)
 
 
-def test_experimento_de_plataforma_novo_nao_entra_por_agente(server):
+def test_experimento_de_plataforma_novo_nao_entra_por_agente(server, admin_conn):
     did = str(fid("dec-remover-confirmacao"))
     with pytest.raises(Exception) as excinfo:
         call(server, "attach_evidence", {
@@ -2717,19 +2833,44 @@ def test_experimento_de_plataforma_novo_nao_entra_por_agente(server):
             "evidence": {"kind": "experiment", "title": "x", "strength": "causal",
                          "source_system": "growthbook", "external_id": "exp_inedito"}})
     assert "ingestão" in str(excinfo.value)
+    assert count(admin_conn, "SELECT count(*) FROM evidence "
+                             "WHERE external_id = 'exp_inedito'") == 0
 
 
 def test_licao_precisa_de_origem(server):
-    with pytest.raises(Exception):
+    with pytest.raises(Exception) as excinfo:
         call(server, "record_learning", {"summary": "algo"})
+    assert "origem" in str(excinfo.value)
 
 
-def test_licao_nasce_proposta(server):
-    data = call(server, "record_learning", {
-        "summary": "Clientes aceitam frete mais caro quando a entrega é no mesmo dia na capital",
-        "decision_ids": [str(fid("dec-frete-gratis-99"))], "tags": ["frete"],
-    }).structured_content["data"]
+def test_licao_nasce_proposta(server, admin_conn):
+    did = proposta(server, "Decisão zeppelin que ensinou algo")
+    eid = str(fid("ev-checkout-confirm"))
+    res = call(server, "record_learning", {
+        "summary": "Clientes aceitam frete zeppelin mais caro quando a entrega é no mesmo dia",
+        "decision_ids": [did, did], "evidence_ids": [eid], "tags": ["Teste-Escrita"],
+    }).structured_content
+    data = res["data"]
     assert data["state"] == "proposed"
+    assert data["linked_decisions"] == [did]
+    assert data["linked_evidence"] == [eid]
+    assert res["pending"]["on_this_record"] == []
+    lid = data["learning_id"]
+    state, recorded_on = admin_conn.execute(
+        "SELECT state::text, recorded_on::text FROM learning WHERE id = %s", (lid,)).fetchone()
+    assert (state, recorded_on) == ("proposed", "2026-09-22")
+    assert count(admin_conn, "SELECT count(*) FROM provenance WHERE object_type = 'learning' "
+                             "AND object_id = %s AND author_kind = 'agent'", lid) == 1
+    assert count(admin_conn, "SELECT count(*) FROM learning_tag x JOIN tag t ON t.id = x.tag_id "
+                             "WHERE x.learning_id = %s AND t.name = 'teste-escrita'", lid) == 1
+
+
+def test_licao_curta_pede_condicao(server):
+    did = proposta(server, "Decisão zeppelin com lição curta")
+    res = call(server, "record_learning", {"summary": "zeppelin funciona",
+                                           "decision_ids": [did]}).structured_content
+    assert res["pending"]["on_this_record"] == [
+        "Lição muito curta para viajar entre projetos: em que condição ela vale?"]
 ```
 
 **Passo 2: rodar e ver falhar.** Esperado: `Unknown tool: propose_decision` ou equivalente.
@@ -2740,8 +2881,9 @@ def test_licao_nasce_proposta(server):
 """Escritas por agente. Tudo nasce 'proposed', com procedência author_kind = agent.
 
 Cada função roda dentro da transação aberta por `server.with_db`: se levantar,
-nada fica gravado. O papel dm_app não tem UPDATE nem DELETE — nada aqui altera
-o que já existe.
+nada fica gravado. O papel dm_app não tem UPDATE nem DELETE, e nas tabelas
+provenance, decision, learning e evidence só pode inserir nas colunas que o
+agente preenche (db/grants.sql) — nada aqui altera o que já existe.
 """
 
 from __future__ import annotations
@@ -2760,9 +2902,26 @@ EVIDENCE_KINDS = ("experiment", "study", "analysis", "document", "external")
 STRENGTHS = ("causal", "correlational", "anecdotal")
 ROLES = ("supports", "contradicts", "discarded")
 
-# O MCP não diz qual modelo está do outro lado. Não inventamos: 'unknown', e o
-# cliente (User-Agent) vai para source_ref. Ver README, "Divergências".
+# Constante, não parâmetro: o banco não impede dm_app de gravar 'human' ou
+# 'import' em provenance, então é o servidor que garante que escrita por MCP
+# é sempre de agente.
+AUTHOR_KIND = "agent"
+
+# O MCP não diz qual modelo está do outro lado, e o clientInfo não chega em HTTP
+# sem estado. Não inventamos: 'unknown', e o cliente (User-Agent) vai para
+# source_ref. Ver README, "Divergências".
 UNKNOWN_MODEL = "unknown"
+
+DECIDER_NOT_FOUND = (
+    "Pessoa não encontrada. Confirme o e-mail com o usuário; o registro não foi criado."
+)
+
+# Mesmas frases do stub: falam só do registro recém-criado.
+PROMPTS = {
+    "alternatives": "Sem alternativas descartadas: quais opções foram consideradas e por que perderam?",
+    "evidence": "Sem evidência vinculada: o que sustentou ou contradisse essa escolha?",
+    "context": "Sem contexto: qual era o problema no momento da decisão?",
+}
 
 
 def _uuid(value: Any, what: str) -> uuid.UUID:
@@ -2770,6 +2929,12 @@ def _uuid(value: Any, what: str) -> uuid.UUID:
         return uuid.UUID(str(value))
     except ValueError:
         raise ToolError(f"{what} inválido: {value}. Use search_evidence para obter o id.") from None
+
+
+def _lock(conn, *parts: object) -> None:
+    """Trava de transação sobre uma chave textual; solta sozinha no commit ou rollback."""
+    conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                 (":".join(str(p) for p in parts),))
 
 
 def require_principal(conn) -> uuid.UUID:
@@ -2791,14 +2956,22 @@ def require_principal(conn) -> uuid.UUID:
 def _provenance(conn, object_type: str, object_id: uuid.UUID, principal: uuid.UUID) -> None:
     conn.execute(
         "INSERT INTO provenance (object_type, object_id, author_kind, principal_person_id, "
-        "model, source_ref) VALUES (%s, %s, 'agent', %s, %s, %s)",
-        (object_type, object_id, principal, UNKNOWN_MODEL,
+        "model, source_ref) VALUES (%s, %s, %s, %s, %s, %s)",
+        (object_type, object_id, AUTHOR_KIND, principal, UNKNOWN_MODEL,
          f"mcp; client={identity.current_client() or 'desconhecido'}"),
     )
 
 
+def normalize_tags(tags: list[str] | None) -> list[str]:
+    """Minúsculas, sem acento e sem espaço nas pontas; vazias somem, repetidas também.
+
+    Satisfaz o CHECK de tag (name = lower(name) AND name <> '').
+    """
+    return sorted({fold(tag).strip() for tag in tags or []} - {""})
+
+
 def _tags(conn, link_table: str, fk: str, object_id: uuid.UUID, tags: list[str] | None) -> None:
-    for name in {fold(tag).strip() for tag in tags or []} - {""}:
+    for name in normalize_tags(tags):
         conn.execute("INSERT INTO tag (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (name,))
         conn.execute(
             f"INSERT INTO {link_table} ({fk}, tag_id) SELECT %s, id FROM tag WHERE name = %s "
@@ -2807,8 +2980,11 @@ def _tags(conn, link_table: str, fk: str, object_id: uuid.UUID, tags: list[str] 
 
 def _slug(conn, title: str) -> str:
     base = "-".join("".join(c if c.isalnum() else " " for c in fold(title)).split())[:80] or "decisao"
+    # Dois títulos iguais ao mesmo tempo escolheriam o mesmo sufixo.
+    _lock(conn, "slug", base)
     taken = {r["slug"] for r in conn.execute(
-        "SELECT slug FROM decision WHERE slug = %s OR slug LIKE %s", (base, base + "-%")).fetchall()}
+        "SELECT slug FROM decision WHERE slug = %s OR slug LIKE %s",
+        (base, base + "-%")).fetchall()}
     if base not in taken:
         return base
     n = 2
@@ -2823,11 +2999,19 @@ def _evidence_exists(conn, evidence_id: uuid.UUID) -> None:
                         "envie o objeto evidence.")
 
 
-PROMPTS = {
-    "alternatives": "Sem alternativas descartadas: quais opções foram consideradas e por que perderam?",
-    "evidence": "Sem evidência vinculada: o que sustentou ou contradisse essa escolha?",
-    "context": "Sem contexto: qual era o problema no momento da decisão?",
-}
+def _decision_exists(conn, decision_id: uuid.UUID) -> None:
+    if conn.execute("SELECT 1 FROM decision WHERE id = %s", (decision_id,)).fetchone() is None:
+        raise ToolError(f"Decisão não encontrada: {decision_id}. Use search_evidence para "
+                        "localizá-la.")
+
+
+def _date(value: str | None) -> date:
+    if not value:
+        return today()
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise ToolError(f"decided_on inválida: {value}. Use o formato AAAA-MM-DD.") from None
 
 
 def propose_decision(conn, *, title: str, description: str, decider_email: str,
@@ -2838,22 +3022,25 @@ def propose_decision(conn, *, title: str, description: str, decider_email: str,
     principal = require_principal(conn)
     missing = [f for f, v in (("alternatives", alternatives), ("evidence", evidence),
                               ("context", context)) if not v]
+    prompts = [PROMPTS[f] for f in missing]
 
     if idempotency_key:
+        # Serializa chamadas com a mesma (pessoa, chave): a segunda espera a
+        # primeira terminar e então encontra a chave já gravada.
+        _lock(conn, "idempotency", principal, idempotency_key)
         row = conn.execute(
             "SELECT d.id::text AS id, d.slug FROM idempotency_key k JOIN decision d "
             "ON d.id = k.object_id WHERE k.principal_person_id = %s AND k.key = %s",
             (principal, idempotency_key)).fetchone()
         if row:
-            return {"decision_id": row["id"], "slug": row["slug"], "missing": missing}, []
+            return {"decision_id": row["id"], "slug": row["slug"], "missing": missing}, prompts
 
     if door not in ("one_way", "two_way"):
         raise ToolError("door deve ser one_way ou two_way.")
     decider = conn.execute("SELECT id FROM person WHERE lower(email) = lower(%s)",
                            (decider_email.strip(),)).fetchone()
     if decider is None:
-        raise ToolError("Pessoa não encontrada. Confirme o e-mail com o usuário; "
-                        "o registro não foi criado.")
+        raise ToolError(DECIDER_NOT_FOUND)
     project_id = None
     if project:
         try:
@@ -2869,13 +3056,13 @@ def propose_decision(conn, *, title: str, description: str, decider_email: str,
     for alt in alternatives or []:
         if not alt.get("description") or not alt.get("rejection_reason"):
             raise ToolError("Cada alternativa precisa de description e rejection_reason.")
+    decided = _date(decided_on)
 
     slug = _slug(conn, title)
     decision_id = conn.execute(
         "INSERT INTO decision (slug, title, context, description, door, decided_on, "
         "decider_person_id, project_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-        (slug, title, context, description, door,
-         date.fromisoformat(decided_on) if decided_on else today(), decider["id"], project_id),
+        (slug, title, context, description, door, decided, decider["id"], project_id),
     ).fetchone()["id"]
     for alt in alternatives or []:
         conn.execute("INSERT INTO alternative (decision_id, description, rejection_reason) "
@@ -2889,8 +3076,7 @@ def propose_decision(conn, *, title: str, description: str, decider_email: str,
         conn.execute("INSERT INTO idempotency_key (principal_person_id, key, object_type, "
                      "object_id) VALUES (%s, %s, 'decision', %s)",
                      (principal, idempotency_key, decision_id))
-    return ({"decision_id": str(decision_id), "slug": slug, "missing": missing},
-            [PROMPTS[f] for f in missing])
+    return {"decision_id": str(decision_id), "slug": slug, "missing": missing}, prompts
 
 
 def _link(conn, decision_id: uuid.UUID, evidence_id: uuid.UUID, role: str | None,
@@ -2918,9 +3104,7 @@ def attach_evidence(conn, *, decision_id: str, role: str, evidence_id: str | Non
                     note: str | None) -> dict[str, Any]:
     principal = require_principal(conn)
     did = _uuid(decision_id, "decision_id")
-    if conn.execute("SELECT 1 FROM decision WHERE id = %s", (did,)).fetchone() is None:
-        raise ToolError(f"Decisão não encontrada: {decision_id}. Use search_evidence para "
-                        "localizá-la.")
+    _decision_exists(conn, did)
     if not evidence_id and not evidence:
         raise ToolError("Informe evidence_id de uma evidência existente ou o objeto evidence.")
 
@@ -2932,6 +3116,9 @@ def attach_evidence(conn, *, decision_id: str, role: str, evidence_id: str | Non
         system, external = evidence.get("source_system"), evidence.get("external_id")
         if bool(system) != bool(external):
             raise ToolError("source_system e external_id vão juntos: informe os dois ou nenhum.")
+        if system:
+            # Duas chamadas com a mesma origem inédita não podem ambas inserir.
+            _lock(conn, "evidence", system, external)
         row = conn.execute("SELECT id FROM evidence WHERE source_system = %s AND external_id = %s",
                            (system, external)).fetchone() if system else None
         if row:
@@ -2953,7 +3140,7 @@ def attach_evidence(conn, *, decision_id: str, role: str, evidence_id: str | Non
                 "INSERT INTO evidence (kind, title, summary, url, source_system, external_id, "
                 "strength) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
                 (kind, evidence["title"], evidence.get("summary"), evidence.get("url"),
-                 system, external, strength)).fetchone()["id"]
+                 system or None, external or None, strength)).fetchone()["id"]
             _provenance(conn, "evidence", eid, principal)
 
     final_role, already = _link(conn, did, eid, role, weight, note)
@@ -2970,30 +3157,34 @@ def record_learning(conn, *, summary: str, decision_ids: list[str] | None,
     principal = require_principal(conn)
     if not decision_ids and not evidence_ids:
         raise ToolError("Uma lição precisa de origem: informe decision_ids ou evidence_ids.")
-    dids = [_uuid(d, "decision_id") for d in decision_ids or []]
-    eids = [_uuid(e, "evidence_id") for e in evidence_ids or []]
+    # dict.fromkeys: tira repetidos sem mudar a ordem, e o vínculo não bate na PK.
+    dids = list(dict.fromkeys(_uuid(d, "decision_id") for d in decision_ids or []))
+    eids = list(dict.fromkeys(_uuid(e, "evidence_id") for e in evidence_ids or []))
     for d in dids:
-        if conn.execute("SELECT 1 FROM decision WHERE id = %s", (d,)).fetchone() is None:
-            raise ToolError(f"Decisão não encontrada: {d}. Use search_evidence para localizá-la.")
+        _decision_exists(conn, d)
     for e in eids:
         _evidence_exists(conn, e)
-    lid = conn.execute("INSERT INTO learning (summary) VALUES (%s) RETURNING id",
-                       (summary,)).fetchone()["id"]
+    lid = conn.execute("INSERT INTO learning (summary, recorded_on) VALUES (%s, %s) RETURNING id",
+                       (summary, today())).fetchone()["id"]
     for d in dids:
-        conn.execute("INSERT INTO decision_learning VALUES (%s, %s)", (d, lid))
+        conn.execute("INSERT INTO decision_learning (decision_id, learning_id) VALUES (%s, %s)",
+                     (d, lid))
     for e in eids:
-        conn.execute("INSERT INTO evidence_learning VALUES (%s, %s)", (e, lid))
+        conn.execute("INSERT INTO evidence_learning (evidence_id, learning_id) VALUES (%s, %s)",
+                     (e, lid))
     _tags(conn, "learning_tag", "learning_id", lid, tags)
     _provenance(conn, "learning", lid, principal)
     return {"learning_id": str(lid), "linked_decisions": [str(d) for d in dids],
             "linked_evidence": [str(e) for e in eids]}
 ```
 
-**Passo 4: registrar em `server.py`.** No ponto "As escritas entram aqui", e acrescente
-`writes` ao import `from . import ...`:
+**Passo 4: registrar em `server.py`.** No ponto "As escritas entram aqui" (o
+comentário sai), acrescente `writes` ao import `from . import ...` e a constante
+`WRITE` ao lado de `READ`:
 
 ```python
-    WRITE = dict(read_only_hint=False, destructive_hint=False, open_world_hint=False)
+    # junto de READ, no topo do módulo:
+    # WRITE = dict(read_only_hint=False, destructive_hint=False, open_world_hint=False)
 
     @server.tool(name="propose_decision", description=DESCRIPTIONS["propose_decision"],
                  annotations=t.ToolAnnotations(idempotent_hint=True, **WRITE))
@@ -3016,7 +3207,7 @@ def record_learning(conn, *, summary: str, decision_ids: list[str] | None,
                 context=context, decided_on=decided_on, door=door, project=project,
                 alternatives=alternatives, tags=tags, evidence=evidence,
                 idempotency_key=idempotency_key)
-            return data, pending.build(conn, context_tags=set(tags or []),
+            return data, pending.build(conn, context_tags=set(writes.normalize_tags(tags)),
                                        on_this_record=on_this_record)
 
         data, block = with_db(pool, work)
@@ -3070,7 +3261,8 @@ def record_learning(conn, *, summary: str, decision_ids: list[str] | None,
                                           evidence_ids=evidence_ids, tags=tags)
             nudge = (["Lição muito curta para viajar entre projetos: em que condição ela vale?"]
                      if len(summary.split()) < 8 else [])
-            return data, pending.build(conn, context_tags=set(tags or []), on_this_record=nudge)
+            return data, pending.build(conn, context_tags=set(writes.normalize_tags(tags)),
+                                       on_this_record=nudge)
 
         data, block = with_db(pool, work)
         body = models.LearningResponse(data=models.LearningData(**data), pending=block)
@@ -3088,7 +3280,8 @@ Esperado: tudo passa, inclusive `test_sao_exatamente_seis_ferramentas` e
 **Passo 6: commit.**
 
 ```bash
-git add server/decision_memory/writes.py server/decision_memory/server.py server/tests_real/test_app_writes.py
+git add server/decision_memory/writes.py server/decision_memory/server.py \
+  server/tests_real/test_app_writes.py server/tests_real/test_app_surface.py
 git commit -m "feat(server): ferramentas de escrita, tudo nasce proposto"
 ```
 

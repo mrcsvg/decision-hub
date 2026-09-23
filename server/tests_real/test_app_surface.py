@@ -23,7 +23,6 @@ def descricoes_do_mcp_tools() -> dict[str, str]:
             for m in re.finditer(r"^### `(\w+)`\n\n> (.+)$", texto, re.MULTILINE)}
 
 
-@pytest.mark.xfail(strict=True, reason="escritas entram na tarefa 10")
 def test_sao_exatamente_seis_ferramentas(tools):
     assert set(tools) == EXPECTED_TOOLS, "não crie a sétima ferramenta sem ADR"
 

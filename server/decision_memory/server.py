@@ -18,12 +18,13 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from psycopg_pool import ConnectionPool
 
-from . import guard, identity, models, pending, reads
+from . import guard, identity, models, pending, reads, writes
 
 log = logging.getLogger("decision_memory")
 T = TypeVar("T")
 
 READ = t.ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
+WRITE = dict(read_only_hint=False, destructive_hint=False, open_world_hint=False)
 
 DESCRIPTIONS = {
     "search_evidence": (
@@ -190,7 +191,87 @@ def build_server(pool: ConnectionPool, audiences: tuple[str, ...] = ()) -> MCPSe
             structured_content=models.PendingReviewsResponse(data=data, pending=block)
             .model_dump(mode="json"))
 
-    # As escritas entram aqui (tarefa 10).
+    @server.tool(name="propose_decision", description=DESCRIPTIONS["propose_decision"],
+                 annotations=t.ToolAnnotations(idempotent_hint=True, **WRITE))
+    def propose_decision(
+        title: str,
+        description: str,
+        decider_email: str,
+        context: str | None = None,
+        decided_on: str | None = None,
+        door: str = "two_way",
+        project: str | None = None,
+        alternatives: list[dict[str, str]] | None = None,
+        tags: list[str] | None = None,
+        evidence: list[dict[str, Any]] | None = None,
+        idempotency_key: str | None = None,
+    ) -> Annotated[t.CallToolResult, models.ProposeResponse]:
+        def work(conn):
+            data, on_this_record = writes.propose_decision(
+                conn, title=title, description=description, decider_email=decider_email,
+                context=context, decided_on=decided_on, door=door, project=project,
+                alternatives=alternatives, tags=tags, evidence=evidence,
+                idempotency_key=idempotency_key)
+            return data, pending.build(conn, context_tags=set(writes.normalize_tags(tags)),
+                                       on_this_record=on_this_record)
+
+        data, block = with_db(pool, work)
+        body = models.ProposeResponse(data=models.ProposeData(**data), pending=block)
+        summary = (f"Decisão registrada como proposta ({data['decision_id']}). Uma pessoa "
+                   "precisa atestá-la e registrar a expectativa; ainda não há superfície "
+                   "de atestação, então ela fica proposta.")
+        return _result(summary, body, block)
+
+    @server.tool(name="attach_evidence", description=DESCRIPTIONS["attach_evidence"],
+                 annotations=t.ToolAnnotations(idempotent_hint=True, **WRITE))
+    def attach_evidence(
+        decision_id: str,
+        role: str,
+        evidence_id: str | None = None,
+        evidence: dict[str, Any] | None = None,
+        weight: float | None = None,
+        note: str | None = None,
+    ) -> Annotated[t.CallToolResult, models.AttachResponse]:
+        def work(conn):
+            data = writes.attach_evidence(conn, decision_id=decision_id, role=role,
+                                          evidence_id=evidence_id, evidence=evidence,
+                                          weight=weight, note=note)
+            tags = {r["name"] for r in conn.execute(
+                "SELECT t.name FROM decision_tag x JOIN tag t ON t.id = x.tag_id "
+                "WHERE x.decision_id = %s", (data["decision_id"],)).fetchall()}
+            nudge = ["Só há evidência favorável registrada até agora: houve algo que "
+                     "contradisse a escolha?"] if data["role"] == "supports" else []
+            return data, pending.build(conn, context_tags=tags, on_this_record=nudge)
+
+        data, block = with_db(pool, work)
+        if data["already_linked"]:
+            summary = (f"Evidência {data['evidence_id']} já estava vinculada como "
+                       f"{data['role']}; nada mudou.")
+        else:
+            summary = (f"Evidência {data['evidence_id']} vinculada como {data['role']}"
+                       + (" (reaproveitada, não duplicada)." if data["reused_existing"] else "."))
+        return _result(summary, models.AttachResponse(data=models.AttachData(**data),
+                                                      pending=block), block)
+
+    @server.tool(name="record_learning", description=DESCRIPTIONS["record_learning"],
+                 annotations=t.ToolAnnotations(idempotent_hint=False, **WRITE))
+    def record_learning(
+        summary: str,
+        decision_ids: list[str] | None = None,
+        evidence_ids: list[str] | None = None,
+        tags: list[str] | None = None,
+    ) -> Annotated[t.CallToolResult, models.LearningResponse]:
+        def work(conn):
+            data = writes.record_learning(conn, summary=summary, decision_ids=decision_ids,
+                                          evidence_ids=evidence_ids, tags=tags)
+            nudge = (["Lição muito curta para viajar entre projetos: em que condição ela vale?"]
+                     if len(summary.split()) < 8 else [])
+            return data, pending.build(conn, context_tags=set(writes.normalize_tags(tags)),
+                                       on_this_record=nudge)
+
+        data, block = with_db(pool, work)
+        body = models.LearningResponse(data=models.LearningData(**data), pending=block)
+        return _result(f"Lição registrada como proposta ({data['learning_id']}).", body, block)
 
     # Ordem importa: a identidade é resolvida antes das recusas e da ferramenta.
     server.middleware.append(identity.middleware(audiences))
