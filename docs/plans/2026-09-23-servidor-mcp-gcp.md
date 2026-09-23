@@ -452,11 +452,27 @@ from __future__ import annotations
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
+# Teto por comando SQL. Uma ferramenta de leitura sobre o volume da v0 leva
+# milissegundos; 5 s só estoura com consulta patológica, e aí é melhor cancelar
+# do que prender uma das quatro conexões do pool.
+STATEMENT_TIMEOUT_MS = 5000
 
-def make_pool(url: str, password: str | None = None) -> ConnectionPool:
-    kwargs: dict = {"row_factory": dict_row}
+
+def connection_kwargs(password: str | None = None) -> dict:
+    """Parâmetros de conexão que o psycopg junta à URL.
+
+    `options` vai como parâmetro de partida da sessão, e por isso vale para
+    qualquer forma de URL — host TCP ou o socket Unix do Cloud SQL
+    (`?host=/cloudsql/...`). Se a URL trouxer `options` própria, esta prevalece.
+    """
+    kwargs: dict = {"options": f"-c statement_timeout={STATEMENT_TIMEOUT_MS}"}
     if password:
         kwargs["password"] = password
+    return kwargs
+
+
+def make_pool(url: str, password: str | None = None) -> ConnectionPool:
+    kwargs: dict = {"row_factory": dict_row, **connection_kwargs(password)}
     # Cloud SQL e o Auth Proxy derrubam conexão ociosa: o pool testa a conexão
     # antes de entregá-la e descarta as que ficaram paradas mais de 5 minutos.
     return ConnectionPool(url, kwargs=kwargs, min_size=1, max_size=4, open=True,
@@ -574,8 +590,10 @@ from __future__ import annotations
 
 import psycopg
 import pytest
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from decision_memory import seed
+from decision_memory.db import STATEMENT_TIMEOUT_MS, connection_kwargs
 
 
 def test_servidor_conecta_como_dm_app(pool):
@@ -592,6 +610,24 @@ def test_dm_app_nao_escreve_expectativa(pool):
                 " expected_magnitude, due_on) VALUES (%s, %s, 0.7, 'm', '+1 p.p.', '2027-01-01')",
                 (seed.fid("dec-push-diario"), seed.fid("p-ana")),
             )
+
+
+def test_consulta_longa_e_cancelada(pool):
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        with pool.connection() as conn:
+            conn.execute("SELECT pg_sleep(%s)", (STATEMENT_TIMEOUT_MS / 1000 + 1,))
+
+
+@pytest.mark.parametrize("url", [
+    "postgresql://dm_app@/decision_memory?host=/cloudsql/proj:regiao:inst",
+    "postgresql://dm_app:x@localhost:5432/decision_memory",
+])
+def test_timeout_vai_na_conexao_em_qualquer_forma_de_url(url):
+    """O pool repassa os kwargs a psycopg.connect, que os junta à URL assim."""
+    info = conninfo_to_dict(make_conninfo(url, **connection_kwargs()))
+    assert info["options"] == f"-c statement_timeout={STATEMENT_TIMEOUT_MS}"
+    assert info["dbname"] == "decision_memory"
+    assert info.get("host") in ("/cloudsql/proj:regiao:inst", "localhost")
 ```
 
 **Passo 7: rodar e ver falhar.**
@@ -998,8 +1034,12 @@ from __future__ import annotations
 
 import base64
 import json
+from types import SimpleNamespace
 
-from decision_memory.guard import forbidden_keys
+import mcp.types as t
+from conftest import run
+
+from decision_memory.guard import forbidden_keys, nul_paths, refuse_nul
 from decision_memory.identity import (
     acting_as,
     current_client,
@@ -1143,6 +1183,29 @@ def test_argumentos_limpos_ou_nao_dict_passam():
     assert forbidden_keys(None) == []
     assert forbidden_keys(["confidence"]) == []
     assert forbidden_keys("confidence") == []
+
+
+def _through(middleware, arguments):
+    ctx = SimpleNamespace(method="tools/call", params={"name": "x", "arguments": arguments})
+
+    async def call_next(_ctx):
+        return "chamou a ferramenta"
+
+    return run(middleware(ctx, call_next))
+
+
+def test_caractere_nulo_e_recusado_antes_da_ferramenta():
+    for args in ({"query": "a\x00b"}, {"tags": ["ok", "x\x00"]},
+                 {"meta": {"nota": "\x00"}}, {"chave\x00": "valor"}):
+        res = _through(refuse_nul, args)
+        assert isinstance(res, t.CallToolResult) and res.is_error, args
+        assert "\\x00" in res.content[0].text and "Nada foi gravado" in res.content[0].text
+
+
+def test_sem_caractere_nulo_segue_para_a_ferramenta():
+    assert _through(refuse_nul, {"query": "checkout", "limit": 3, "tags": None}) \
+        == "chamou a ferramenta"
+    assert nul_paths({"a": ["x", {"b": "y\x00"}]}) == ["a[1].b"]
 ```
 
 **Passo 2: rodar e ver falhar.** `.venv/bin/python -m pytest server/tests_real/test_app_identity.py -q` → import falha.
@@ -1355,6 +1418,53 @@ async def refuse_expectation(ctx, call_next):
                 is_error=True, content=[t.TextContent(type="text", text=text)]
             )
     return await call_next(ctx)
+
+
+NUL_REFUSAL = (
+    "Parâmetro inválido: texto com caractere nulo (\\x00). Nada foi gravado."
+)
+
+
+def nul_paths(arguments: Any) -> list[str]:
+    """Caminhos das chaves ou valores de texto que contêm o caractere nulo.
+
+    O Postgres não guarda \\x00 em text. Tirá-lo em silêncio mudaria o dado;
+    recusar com a mensagem certa deixa o agente corrigir e chamar de novo.
+    """
+    found: set[str] = set()
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, str):
+            if "\x00" in node:
+                found.add(path or "(argumento)")
+        elif isinstance(node, Mapping):
+            for key, value in node.items():
+                child = f"{path}.{key}" if path else str(key)
+                if isinstance(key, str) and "\x00" in key:
+                    found.add(child.replace("\x00", "\\x00"))
+                walk(value, child.replace("\x00", "\\x00"))
+        elif isinstance(node, list | tuple):
+            for index, item in enumerate(node):
+                walk(item, f"{path}[{index}]")
+
+    walk(arguments, "")
+    return sorted(found)
+
+
+async def refuse_nul(ctx, call_next):
+    """Middleware: recusa `tools/call` com \\x00 em qualquer texto dos argumentos.
+
+    Vale para as seis ferramentas de uma vez: é na fronteira, antes de qualquer
+    SQL, que o erro ainda pode ser explicado ao agente.
+    """
+    if ctx.method == "tools/call" and isinstance(ctx.params, Mapping):
+        offending = nul_paths(ctx.params.get("arguments") or {})
+        if offending:
+            text = f"{NUL_REFUSAL} Campos: {', '.join(offending)}. Chame de novo sem ele."
+            return t.CallToolResult(
+                is_error=True, content=[t.TextContent(type="text", text=text)]
+            )
+    return await call_next(ctx)
 ```
 
 **Passo 5: rodar e ver passar.** Esperado: todos passam.
@@ -1561,9 +1671,23 @@ _DC_TEXT = _folded_tsvector(
 )
 _LN_TEXT = _folded_tsvector("l.summary")
 
+# Consulta com mais palavras que isso não é pergunta, é texto colado; e cada
+# termo custa um to_tsquery por linha em _HITS. As primeiras bastam.
+MAX_TERMS = 32
+
 # Termos em OR: a relevância é decidida em Python, com a mesma regra do stub.
+# Tag pode ter hífen ou espaço (spec: `^[a-z0-9][a-z0-9 _./-]*$`), então é
+# comparada palavra a palavra, pelo mesmo tsvector dobrado.
 _HITS = "(SELECT count(*) FROM unnest(%(terms)s::text[]) term WHERE {vec} @@ to_tsquery('simple', term))"
-_CANDIDATE = "(%(any)s::text IS NULL OR {vec} @@ to_tsquery('simple', %(any)s) OR {tags} && %(terms)s::text[])"
+_CANDIDATE = (
+    "(%(any)s::text IS NULL OR {vec} @@ to_tsquery('simple', %(any)s)"
+    " OR {tag_vec} @@ to_tsquery('simple', %(any)s))"
+)
+
+
+def _candidate(vec: str, tags_sql: str) -> str:
+    return _CANDIDATE.format(vec=vec, tag_vec=_folded_tsvector(f"array_to_string({tags_sql}, ' ')"))
+
 
 _EV_TAGS = "ARRAY(SELECT t.name FROM evidence_tag x JOIN tag t ON t.id = x.tag_id WHERE x.evidence_id = e.id)"
 _LN_TAGS = "ARRAY(SELECT t.name FROM learning_tag x JOIN tag t ON t.id = x.tag_id WHERE x.learning_id = l.id)"
@@ -1574,7 +1698,7 @@ SELECT e.id::text AS id, e.title, e.summary, e.strength::text AS strength,
        e.source_system, e.external_id, e.url, {_EV_TAGS} AS tags,
        {_HITS.format(vec=_EV_TEXT)} AS hits, {EVIDENCE_STATE} AS state
   FROM evidence e
- WHERE {_CANDIDATE.format(vec=_EV_TEXT, tags=_EV_TAGS)}
+ WHERE {_candidate(_EV_TEXT, _EV_TAGS)}
    AND (%(kinds)s::text[] IS NULL OR e.kind::text = ANY(%(kinds)s))
    AND (%(source_system)s::text IS NULL OR e.source_system = %(source_system)s)
    AND (%(tags)s::text[] IS NULL OR {_EV_TAGS} && %(tags)s::text[])
@@ -1584,7 +1708,7 @@ SEARCH_LEARNING_SQL = f"""
 SELECT l.id::text AS id, l.summary AS title, NULL AS summary, l.state::text AS state,
        {_LN_TAGS} AS tags, {_HITS.format(vec=_LN_TEXT)} AS hits
   FROM learning l
- WHERE {_CANDIDATE.format(vec=_LN_TEXT, tags=_LN_TAGS)}
+ WHERE {_candidate(_LN_TEXT, _LN_TAGS)}
    AND (%(tags)s::text[] IS NULL OR {_LN_TAGS} && %(tags)s::text[])
 """
 
@@ -1592,7 +1716,7 @@ SEARCH_DECISION_SQL = f"""
 SELECT d.id::text AS id, d.title, d.description AS summary, d.state::text AS state,
        {_DC_TAGS} AS tags, {_HITS.format(vec=_DC_TEXT)} AS hits
   FROM decision d
- WHERE {_CANDIDATE.format(vec=_DC_TEXT, tags=_DC_TAGS)}
+ WHERE {_candidate(_DC_TEXT, _DC_TAGS)}
    AND (%(tags)s::text[] IS NULL OR {_DC_TAGS} && %(tags)s::text[])
 """
 
@@ -1635,12 +1759,14 @@ def search(conn, query: str, tags: list[str] | None, kinds: list[str] | None,
         # Tipo e origem são atributos de evidência; pedir por eles restringe a busca.
         include = ["evidence"]
     limit = max(1, min(int(limit), 50))
-    wanted_tags = [fold(tag) for tag in (tags or [])]
-    # Como no stub, as tags pedidas entram como termos, passando por `terms()`:
-    # tag crua em to_tsquery seria erro de sintaxe com "(" ou "&".
+    # O filtro por tag é pelo nome exato, dobrado; como no stub, as palavras da
+    # tag também entram como termos, passando por `terms()`: tag crua em
+    # to_tsquery seria erro de sintaxe com "(" ou "&".
+    wanted_tags = [name for name in (fold(tag).strip() for tag in (tags or [])) if name]
     words = terms(query)
     for tag in wanted_tags:
         words += [w for w in terms(tag) if w not in words]
+    words = words[:MAX_TERMS]
     params: dict[str, Any] = {
         "terms": words,
         "any": " | ".join(words) or None,
@@ -1651,7 +1777,8 @@ def search(conn, query: str, tags: list[str] | None, kinds: list[str] | None,
     scored: list[tuple[float, models.SearchItem]] = []
 
     def keep(row: dict, item: models.SearchItem) -> None:
-        tag_hits = len(set(words) & set(row["tags"]))
+        tag_tokens = {w for tag in row["tags"] for w in terms(tag)}
+        tag_hits = len(set(words) & tag_tokens)
         score = relevance(len(words), row["hits"], tag_hits)
         if score > 0:
             scored.append((score, item))
@@ -1698,10 +1825,11 @@ def get_decision(conn, id: str | None, slug: str | None) -> models.DecisionData:
           FROM decision d
           JOIN person p ON p.id = d.decider_person_id
           LEFT JOIN project pr ON pr.id = d.project_id
-         WHERE d.id = %s OR d.slug = %s
+         WHERE d.id = %(id)s OR d.slug = %(slug)s
+         ORDER BY (d.id = %(id)s) DESC NULLS LAST  -- vindo os dois, o id vence
          LIMIT 1
         """,
-        (_as_uuid(id), slug),
+        {"id": _as_uuid(id), "slug": slug},
     ).fetchone()
     if row is None:
         raise ToolError(
@@ -1709,6 +1837,8 @@ def get_decision(conn, id: str | None, slug: str | None) -> models.DecisionData:
         )
     did = row["id"]
 
+    # Alternativas e lições não têm coluna de ordem de inserção: o id (uuid)
+    # dá ordem estável, não cronológica.
     alternatives = [
         models.Alternative(description=a["description"], rejection_reason=a["rejection_reason"])
         for a in conn.execute(
@@ -1744,7 +1874,7 @@ def get_decision(conn, id: str | None, slug: str | None) -> models.DecisionData:
                               verdict=r["verdict"], notes=r["notes"])
         for r in conn.execute(
             "SELECT id::text AS id, due_on, done_on, verdict::text AS verdict, notes "
-            "FROM review WHERE decision_id = %s ORDER BY due_on", (did,)).fetchall()
+            "FROM review WHERE decision_id = %s ORDER BY due_on, id", (did,)).fetchall()
     ]
 
     expectation = None
@@ -1768,7 +1898,7 @@ def get_decision(conn, id: str | None, slug: str | None) -> models.DecisionData:
           LEFT JOIN person pp ON pp.id = pv.principal_person_id
           LEFT JOIN person pa ON pa.id = pv.attested_by
          WHERE pv.object_type = 'decision' AND pv.object_id = %s
-         ORDER BY pv.created_at LIMIT 1
+         ORDER BY pv.created_at, pv.id LIMIT 1
         """, (did,)).fetchone()
 
     return models.DecisionData(
@@ -1800,6 +1930,7 @@ def pending_reviews(conn, owner_email: str | None, project: str | None, overdue_
          WHERE r.done_on IS NULL
            AND (%(owner)s::text IS NULL OR lower(p.email) = lower(%(owner)s))
            AND (%(project)s::text IS NULL OR pr.name ILIKE '%%' || %(project)s || '%%')
+         ORDER BY r.due_on, d.id, r.id
         """,
         {"owner": owner_email, "project": project},
     ).fetchall()
@@ -1812,7 +1943,9 @@ def pending_reviews(conn, owner_email: str | None, project: str | None, overdue_
             review_id=r["review_id"], decision_id=r["decision_id"], slug=r["slug"],
             title=r["title"], due_on=r["due_on"].isoformat(), overdue_days=overdue,
             owner=r["owner"], project=r["project"]))
-    reviews.sort(key=lambda r: r.overdue_days, reverse=True)
+    # Mais vencida primeiro; decisão e revisão desempatam, para a ordem não
+    # depender do plano de execução.
+    reviews.sort(key=lambda r: (-r.overdue_days, r.decision_id, r.review_id))
 
     unattested: list[models.UnattestedItem] = []
     if include_unattested:
@@ -1864,6 +1997,7 @@ import re
 import pytest
 from conftest import ROOT, run
 
+from decision_memory import guard
 from decision_memory.server import build_server
 
 EXPECTED_TOOLS = {"search_evidence", "get_decision", "propose_decision",
@@ -1881,6 +2015,7 @@ def descricoes_do_mcp_tools() -> dict[str, str]:
             for m in re.finditer(r"^### `(\w+)`\n\n> (.+)$", texto, re.MULTILINE)}
 
 
+@pytest.mark.xfail(strict=True, reason="escritas entram na tarefa 10")
 def test_sao_exatamente_seis_ferramentas(tools):
     assert set(tools) == EXPECTED_TOOLS, "não crie a sétima ferramenta sem ADR"
 
@@ -1908,6 +2043,13 @@ def test_nenhum_schema_de_entrada_pede_confianca_ou_expectativa(tools):
         campos = " ".join(tool.input_schema.get("properties", {})).lower()
         for termo in ("confidence", "confianca", "expectation", "expectativa", "certeza"):
             assert termo not in campos, f"{name} expõe '{termo}'"
+
+
+def test_ordem_das_middlewares(pool):
+    """Identidade primeiro; depois as recusas, antes de qualquer ferramenta."""
+    nossas = build_server(pool).middleware[-3:]
+    assert nossas[0].__name__ == "resolve_identity"
+    assert nossas[1:] == [guard.refuse_expectation, guard.refuse_nul]
 ```
 
 **Passo 2: testes de leitura.** `server/tests_real/test_app_reads.py`:
@@ -1915,9 +2057,17 @@ def test_nenhum_schema_de_entrada_pede_confianca_ou_expectativa(tools):
 ```python
 from __future__ import annotations
 
+import time
+
+import psycopg
 import pytest
 from conftest import run
+from mcp.server.mcpserver.exceptions import ToolError
 
+from decision_memory import reads
+from decision_memory.guard import fold
+from decision_memory.identity import acting_as
+from decision_memory.reads import terms
 from decision_memory.seed import fid
 from decision_memory.server import build_server
 
@@ -1950,21 +2100,40 @@ def test_busca_sem_resultado_manda_dizer_isso_em_voz_alta(server):
     assert "explicitamente" in data["note"]
 
 
-def test_ordem_da_busca_nao_depende_do_efeito(server, admin_conn):
-    """ADR 0003: ranquear por efeito compara grandezas de origens diferentes."""
-    consulta = {"query": "checkout conversão"}
-    antes = [i["id"] for i in call(server, "search_evidence", consulta).structured_content["data"]["items"]]
-    admin_conn.execute(
-        "UPDATE evidence SET normalized = jsonb_set(normalized, '{effect,point}', "
-        "to_jsonb((normalized->'effect'->>'point')::numeric * 100 + 10)) "
-        "WHERE normalized ? 'effect'")
+NEGATE_EFFECT = (
+    "UPDATE evidence SET normalized = jsonb_set(normalized, '{effect,point}', "
+    "to_jsonb(-(normalized->'effect'->>'point')::numeric)) "
+    "WHERE normalized->'effect'->>'point' IS NOT NULL"
+)
+
+
+def test_ordem_da_busca_nao_depende_do_efeito_nem_da_forca(server, admin_conn):
+    """ADR 0003: ranquear por efeito compara grandezas de origens diferentes.
+
+    Inverter o sinal de todo efeito inverte a ordem entre eles, e rebaixar a
+    força só do primeiro colocado o tiraria do topo: se a busca olhasse para
+    qualquer dos dois, a ordem mudaria.
+    """
+    consulta = {"query": "checkout conversão", "include": ["evidence"]}
+    antes = _ids(server, consulta)
+    com_efeito = [r[0] for r in admin_conn.execute(
+        "SELECT id::text FROM evidence WHERE id::text = ANY(%s) "
+        "AND normalized->'effect'->>'point' IS NOT NULL", (antes,))]
+    pontos = {r[0] for r in admin_conn.execute(
+        "SELECT normalized->'effect'->>'point' FROM evidence WHERE id::text = ANY(%s)",
+        (com_efeito,))}
+    assert len(com_efeito) >= 2 and len(pontos) >= 2, "o teste precisa de efeitos distintos"
+    primeiro = antes[0]
+    forca = admin_conn.execute("SELECT strength FROM evidence WHERE id = %s",
+                               (primeiro,)).fetchone()[0]
+    assert forca == "causal"
+    admin_conn.execute(NEGATE_EFFECT)
+    admin_conn.execute("UPDATE evidence SET strength = 'anecdotal' WHERE id = %s", (primeiro,))
     try:
-        depois = [i["id"] for i in call(server, "search_evidence", consulta).structured_content["data"]["items"]]
+        depois = _ids(server, consulta)
     finally:
-        admin_conn.execute(
-            "UPDATE evidence SET normalized = jsonb_set(normalized, '{effect,point}', "
-            "to_jsonb(((normalized->'effect'->>'point')::numeric - 10) / 100)) "
-            "WHERE normalized ? 'effect'")
+        admin_conn.execute(NEGATE_EFFECT)
+        admin_conn.execute("UPDATE evidence SET strength = %s WHERE id = %s", (forca, primeiro))
     assert antes == depois
 
 
@@ -2016,6 +2185,141 @@ def test_pending_prioriza_revisao_da_mesma_tag(server):
     res = call(server, "search_evidence", {"query": "onboarding"})
     due = res.structured_content["pending"]["reviews_due"]
     assert due[0]["decision_id"] == str(fid("dec-onboarding-tres-etapas"))
+
+
+def test_termo_nunca_carrega_operador_de_tsquery():
+    """Cada termo vai para to_tsquery: só letras e dígitos podem chegar lá."""
+    for palavra in terms("checkout & !x | (y) 'aspas' a:b c*d <-> e\\f"):
+        assert palavra.isalnum(), palavra
+
+
+@pytest.mark.parametrize("consulta", [
+    "checkout & !x | (y",
+    "checkout' | 'x",
+    "checkout:* & conversão:A",
+    "checkout <-> confirmação",
+    "'''",
+    "::: *** !!!",
+])
+def test_operadores_de_tsquery_na_consulta_sao_inofensivos(server, consulta):
+    res = call(server, "search_evidence", {"query": consulta})
+    assert not res.is_error
+    assert "data" in res.structured_content
+
+
+def _ids(server, args):
+    res = call(server, "search_evidence", args)
+    return [i["id"] for i in res.structured_content["data"]["items"]]
+
+
+def test_busca_ignora_acento_e_caixa(server):
+    """Como no stub: consulta sem acento acha texto com acento, e vice-versa."""
+    com_acento = _ids(server, {"query": "confirmação"})
+    assert com_acento
+    assert _ids(server, {"query": "confirmacao"}) == com_acento
+    assert _ids(server, {"query": "CONFIRMAÇÃO"}) == com_acento
+
+
+def test_termos_saem_sem_acento():
+    assert terms("CONFIRMAÇÃO não Conversão") == ["confirmacao", "conversao"]
+
+
+@pytest.mark.parametrize("collation", ["", ' COLLATE "C"'])
+def test_dobra_no_banco_independe_da_collation(admin_conn, collation):
+    """Com collation C, lower() não mexe em Ç nem Ã; a dobra tem de dar conta."""
+    sql = reads.fold_sql(f"(%s::text{collation})")
+    assert admin_conn.execute(f"SELECT {sql}", ("CONFIRMAÇÃO Ações ÚNICA",)).fetchone()[0] \
+        == "confirmacao acoes unica"
+
+
+def test_dobra_do_banco_e_do_python_concordam():
+    assert len(reads.ACCENTED) == len(reads.PLAIN)
+    for com, sem in zip(reads.ACCENTED, reads.PLAIN, strict=True):
+        assert fold(com) == sem, com
+
+
+def test_operadores_de_tsquery_nas_tags_sao_inofensivos(server):
+    res = call(server, "search_evidence", {"query": "checkout", "tags": ["x & !y", "(z", "a:*"]})
+    assert not res.is_error
+
+
+@pytest.fixture
+def evidencia_com_tag_composta(admin_conn):
+    """Evidência cuja única ligação com "página única" é a tag hifenizada."""
+    eid = admin_conn.execute(
+        "INSERT INTO evidence (kind, title, summary) VALUES ('analysis', "
+        "'Registro zzqk de teste', 'Texto sem as palavras da tag') RETURNING id::text"
+    ).fetchone()[0]
+    tid = admin_conn.execute(
+        "INSERT INTO tag (name) VALUES ('pagina-unica') RETURNING id").fetchone()[0]
+    admin_conn.execute("INSERT INTO evidence_tag VALUES (%s, %s)", (eid, tid))
+    try:
+        yield eid
+    finally:
+        admin_conn.execute("DELETE FROM evidence_tag WHERE evidence_id = %s", (eid,))
+        admin_conn.execute("DELETE FROM evidence WHERE id = %s", (eid,))
+        admin_conn.execute("DELETE FROM tag WHERE id = %s", (tid,))
+
+
+def test_tag_composta_casa_por_palavra(server, evidencia_com_tag_composta):
+    """Tag pode ter hífen ou espaço (spec): casa palavra a palavra, como no stub."""
+    assert evidencia_com_tag_composta in _ids(server, {"query": "pagina unica"})
+
+
+def test_filtro_por_tag_composta_e_pelo_nome_exato(server, evidencia_com_tag_composta):
+    for tag in ("pagina-unica", " Página-Única "):
+        assert _ids(server, {"query": "", "tags": [tag]}) == [evidencia_com_tag_composta], tag
+    assert _ids(server, {"query": "", "tags": ["pagina"]}) == []
+
+
+def test_consulta_enorme_usa_so_os_primeiros_termos(server):
+    """10 mil palavras: só as MAX_TERMS primeiras contam, e responde rápido."""
+    palavras = ["checkout", "confirmação"] + [f"zz{i:05d}" for i in range(10_000)]
+    inicio = time.monotonic()
+    enorme = _ids(server, {"query": " ".join(palavras)})
+    assert time.monotonic() - inicio < 2
+    assert enorme == _ids(server, {"query": " ".join(palavras[:reads.MAX_TERMS])})
+    assert enorme
+
+
+def test_id_vence_slug_quando_vem_os_dois(server):
+    data = call(server, "get_decision", {"id": str(fid("dec-push-diario")),
+                                         "slug": "remover-confirmacao-checkout"})
+    assert data.structured_content["data"]["slug"] != "remover-confirmacao-checkout"
+    assert data.structured_content["data"]["decision_id"] == str(fid("dec-push-diario"))
+
+
+def test_dono_padrao_vem_da_identidade(server):
+    with acting_as("carla@exemplo.com.br"):
+        data = call(server, "list_pending_reviews", {}).structured_content["data"]
+    assert [r["slug"] for r in data["reviews"]] == ["onboarding-tres-etapas"]
+    with acting_as("ana@exemplo.com.br"):
+        data = call(server, "list_pending_reviews", {}).structured_content["data"]
+    assert {r["slug"] for r in data["reviews"]} == {"remover-confirmacao-checkout",
+                                                    "manter-devolucao-30-dias"}
+
+
+@pytest.mark.parametrize("erro", [psycopg.OperationalError("SELECT segredo FROM tabela_x"),
+                                  RuntimeError("segredo no traceback")])
+def test_erro_inesperado_vira_mensagem_generica(server, monkeypatch, caplog, erro):
+    def explode(*args, **kwargs):
+        raise erro
+
+    monkeypatch.setattr(reads, "search", explode)
+    with pytest.raises(ToolError) as excinfo:
+        call(server, "search_evidence", {"query": "checkout"})
+    mensagem = str(excinfo.value)
+    assert "ref" in mensagem and "segredo" not in mensagem
+    ref = mensagem.split("ref ")[1].split(")")[0]
+    assert any(ref in r.getMessage() and type(erro).__name__ in r.getMessage()
+               for r in caplog.records)
+
+
+def test_resumo_em_texto_corta_a_consulta(server):
+    consulta = "checkout " + "x" * 500
+    res = call(server, "search_evidence", {"query": consulta})
+    assert res.structured_content["data"]["query"] == consulta
+    assert "x" * 121 not in res.content[0].text
 ```
 
 Se `test_duas_revisoes_vencidas` falhar, compare com o stub (`server/tests/test_stub.py`,
@@ -2095,6 +2399,14 @@ NOTHING_FOUND = (
 )
 
 
+# Consulta ecoada no resumo em texto; o `structured_content` leva a íntegra.
+MAX_ECHO = 120
+
+
+def _echo(query: str) -> str:
+    return query if len(query) <= MAX_ECHO else query[:MAX_ECHO] + "…"
+
+
 def _text(*parts: str) -> list[t.TextContent]:
     return [t.TextContent(type="text", text=" ".join(p for p in parts if p))]
 
@@ -2121,11 +2433,16 @@ def with_db(pool: ConnectionPool, work: Callable[[psycopg.Connection], T]) -> T:
             return work(conn)
     except ToolError:
         raise
-    except psycopg.Error as exc:
+    except Exception as exc:
+        # Qualquer outra falha, de banco ou não, sai com a mesma mensagem: o
+        # detalhe (SQL, traceback) fica no log, achável pela ref.
         ref = uuid.uuid4().hex[:8]
-        bug = isinstance(exc, psycopg.errors.InsufficientPrivilege)
-        log.error(json.dumps({"event": "db_error", "ref": ref, "bug": bug,
-                              "sqlstate": exc.sqlstate, "error": str(exc)}))
+        bug = not isinstance(exc, psycopg.OperationalError)
+        log.error(json.dumps({"event": "db_error" if isinstance(exc, psycopg.Error)
+                              else "internal_error",
+                              "ref": ref, "bug": bug, "type": type(exc).__name__,
+                              "sqlstate": getattr(exc, "sqlstate", None),
+                              "error": str(exc)}))
         raise ToolError(
             f"Erro interno ao acessar o registro (ref {ref}). Nada foi gravado. "
             "Tente de novo; se persistir, avise quem administra o servidor."
@@ -2165,8 +2482,8 @@ def build_server(pool: ConnectionPool, audiences: tuple[str, ...] = ()) -> MCPSe
             data=models.SearchData(query=query, items=items, total=total,
                                    note=None if items else NOTHING_FOUND),
             pending=block)
-        summary = (f"{len(items)} de {total} resultados para '{query}'." if items
-                   else f"Nenhum resultado para '{query}'.")
+        summary = (f"{len(items)} de {total} resultados para '{_echo(query)}'." if items
+                   else f"Nenhum resultado para '{_echo(query)}'.")
         return _result(summary, body, block)
 
     @server.tool(name="get_decision", description=DESCRIPTIONS["get_decision"], annotations=READ)
@@ -2207,9 +2524,10 @@ def build_server(pool: ConnectionPool, audiences: tuple[str, ...] = ()) -> MCPSe
 
     # As escritas entram aqui (tarefa 10).
 
-    # Ordem importa: a identidade é resolvida antes da guarda e da ferramenta.
+    # Ordem importa: a identidade é resolvida antes das recusas e da ferramenta.
     server.middleware.append(identity.middleware(audiences))
     server.middleware.append(guard.refuse_expectation)
+    server.middleware.append(guard.refuse_nul)
     return server
 ```
 
@@ -2222,8 +2540,9 @@ ainda não encontra).
 ```bash
 .venv/bin/python -m pytest server/tests_real -q
 ```
-Esperado: `test_sao_exatamente_seis_ferramentas` e `test_descricoes_sao_as_do_mcp_tools` falham
-(só três ferramentas); o resto passa. Se algum teste de busca falhar, **não mexa na regra de
+Esperado: tudo passa; `test_sao_exatamente_seis_ferramentas` sai como xfail (só três
+ferramentas). `test_descricoes_sao_as_do_mcp_tools` já passa: confere as seis descrições de
+MCP_TOOLS.md contra as ferramentas registradas, que por ora são as três de leitura. Se algum teste de busca falhar, **não mexa na regra de
 relevância para passar** — compare com o stub e entenda a diferença (provável: acento).
 
 **Passo 6: commit.**
@@ -2241,6 +2560,8 @@ git commit -m "feat(server): ferramentas de leitura sobre o Postgres"
 - Criar: `server/decision_memory/writes.py`
 - Modificar: `server/decision_memory/server.py` (no ponto "As escritas entram aqui")
 - Criar: `server/tests_real/test_app_writes.py`
+- Modificar: `server/tests_real/test_app_surface.py` — tirar o `xfail` de
+  `test_sao_exatamente_seis_ferramentas` (é `strict`: com as seis, passa e o xfail vira falha)
 
 **Passo 1: testes.** `server/tests_real/test_app_writes.py`:
 
@@ -3165,6 +3486,14 @@ curl -s localhost:8080/mcp $H -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
   Acento e caixa são ignorados, como no stub, dobrando o texto na hora da consulta; por isso o
   índice GIN de `search` não é usado. Quando o volume pedir, `unaccent` numa coluna gerada com
   índice, via ADR.
+- **Busca**: URL e caminho de arquivo viram um token só no parser do Postgres
+  (`checkout.exemplo.com/v2` gera `checkout.exemplo.com` e `/v2`, nunca `checkout`), enquanto
+  o stub partia na pontuação; buscar por uma palavra de dentro deles não acha.
+- **Busca**: só as 32 primeiras palavras da consulta contam (`MAX_TERMS`).
+- **Banco**: todo comando SQL tem teto de 5 s (`statement_timeout`); estourou, a ferramenta
+  responde erro interno com ref.
+- **Argumentos**: texto com caractere nulo (`\x00`) é recusado antes da ferramenta, em
+  qualquer das seis; o Postgres não guarda esse caractere.
 ````
 
 **Passo 2: README raiz.** Em "Estrutura", troque a linha de `server/` por:

@@ -55,9 +55,23 @@ _DC_TEXT = _folded_tsvector(
 )
 _LN_TEXT = _folded_tsvector("l.summary")
 
+# Consulta com mais palavras que isso não é pergunta, é texto colado; e cada
+# termo custa um to_tsquery por linha em _HITS. As primeiras bastam.
+MAX_TERMS = 32
+
 # Termos em OR: a relevância é decidida em Python, com a mesma regra do stub.
+# Tag pode ter hífen ou espaço (spec: `^[a-z0-9][a-z0-9 _./-]*$`), então é
+# comparada palavra a palavra, pelo mesmo tsvector dobrado.
 _HITS = "(SELECT count(*) FROM unnest(%(terms)s::text[]) term WHERE {vec} @@ to_tsquery('simple', term))"
-_CANDIDATE = "(%(any)s::text IS NULL OR {vec} @@ to_tsquery('simple', %(any)s) OR {tags} && %(terms)s::text[])"
+_CANDIDATE = (
+    "(%(any)s::text IS NULL OR {vec} @@ to_tsquery('simple', %(any)s)"
+    " OR {tag_vec} @@ to_tsquery('simple', %(any)s))"
+)
+
+
+def _candidate(vec: str, tags_sql: str) -> str:
+    return _CANDIDATE.format(vec=vec, tag_vec=_folded_tsvector(f"array_to_string({tags_sql}, ' ')"))
+
 
 _EV_TAGS = "ARRAY(SELECT t.name FROM evidence_tag x JOIN tag t ON t.id = x.tag_id WHERE x.evidence_id = e.id)"
 _LN_TAGS = "ARRAY(SELECT t.name FROM learning_tag x JOIN tag t ON t.id = x.tag_id WHERE x.learning_id = l.id)"
@@ -68,7 +82,7 @@ SELECT e.id::text AS id, e.title, e.summary, e.strength::text AS strength,
        e.source_system, e.external_id, e.url, {_EV_TAGS} AS tags,
        {_HITS.format(vec=_EV_TEXT)} AS hits, {EVIDENCE_STATE} AS state
   FROM evidence e
- WHERE {_CANDIDATE.format(vec=_EV_TEXT, tags=_EV_TAGS)}
+ WHERE {_candidate(_EV_TEXT, _EV_TAGS)}
    AND (%(kinds)s::text[] IS NULL OR e.kind::text = ANY(%(kinds)s))
    AND (%(source_system)s::text IS NULL OR e.source_system = %(source_system)s)
    AND (%(tags)s::text[] IS NULL OR {_EV_TAGS} && %(tags)s::text[])
@@ -78,7 +92,7 @@ SEARCH_LEARNING_SQL = f"""
 SELECT l.id::text AS id, l.summary AS title, NULL AS summary, l.state::text AS state,
        {_LN_TAGS} AS tags, {_HITS.format(vec=_LN_TEXT)} AS hits
   FROM learning l
- WHERE {_CANDIDATE.format(vec=_LN_TEXT, tags=_LN_TAGS)}
+ WHERE {_candidate(_LN_TEXT, _LN_TAGS)}
    AND (%(tags)s::text[] IS NULL OR {_LN_TAGS} && %(tags)s::text[])
 """
 
@@ -86,7 +100,7 @@ SEARCH_DECISION_SQL = f"""
 SELECT d.id::text AS id, d.title, d.description AS summary, d.state::text AS state,
        {_DC_TAGS} AS tags, {_HITS.format(vec=_DC_TEXT)} AS hits
   FROM decision d
- WHERE {_CANDIDATE.format(vec=_DC_TEXT, tags=_DC_TAGS)}
+ WHERE {_candidate(_DC_TEXT, _DC_TAGS)}
    AND (%(tags)s::text[] IS NULL OR {_DC_TAGS} && %(tags)s::text[])
 """
 
@@ -129,12 +143,14 @@ def search(conn, query: str, tags: list[str] | None, kinds: list[str] | None,
         # Tipo e origem são atributos de evidência; pedir por eles restringe a busca.
         include = ["evidence"]
     limit = max(1, min(int(limit), 50))
-    wanted_tags = [fold(tag) for tag in (tags or [])]
-    # Como no stub, as tags pedidas entram como termos, passando por `terms()`:
-    # tag crua em to_tsquery seria erro de sintaxe com "(" ou "&".
+    # O filtro por tag é pelo nome exato, dobrado; como no stub, as palavras da
+    # tag também entram como termos, passando por `terms()`: tag crua em
+    # to_tsquery seria erro de sintaxe com "(" ou "&".
+    wanted_tags = [name for name in (fold(tag).strip() for tag in (tags or [])) if name]
     words = terms(query)
     for tag in wanted_tags:
         words += [w for w in terms(tag) if w not in words]
+    words = words[:MAX_TERMS]
     params: dict[str, Any] = {
         "terms": words,
         "any": " | ".join(words) or None,
@@ -145,7 +161,8 @@ def search(conn, query: str, tags: list[str] | None, kinds: list[str] | None,
     scored: list[tuple[float, models.SearchItem]] = []
 
     def keep(row: dict, item: models.SearchItem) -> None:
-        tag_hits = len(set(words) & set(row["tags"]))
+        tag_tokens = {w for tag in row["tags"] for w in terms(tag)}
+        tag_hits = len(set(words) & tag_tokens)
         score = relevance(len(words), row["hits"], tag_hits)
         if score > 0:
             scored.append((score, item))
@@ -192,10 +209,11 @@ def get_decision(conn, id: str | None, slug: str | None) -> models.DecisionData:
           FROM decision d
           JOIN person p ON p.id = d.decider_person_id
           LEFT JOIN project pr ON pr.id = d.project_id
-         WHERE d.id = %s OR d.slug = %s
+         WHERE d.id = %(id)s OR d.slug = %(slug)s
+         ORDER BY (d.id = %(id)s) DESC NULLS LAST  -- vindo os dois, o id vence
          LIMIT 1
         """,
-        (_as_uuid(id), slug),
+        {"id": _as_uuid(id), "slug": slug},
     ).fetchone()
     if row is None:
         raise ToolError(
@@ -203,6 +221,8 @@ def get_decision(conn, id: str | None, slug: str | None) -> models.DecisionData:
         )
     did = row["id"]
 
+    # Alternativas e lições não têm coluna de ordem de inserção: o id (uuid)
+    # dá ordem estável, não cronológica.
     alternatives = [
         models.Alternative(description=a["description"], rejection_reason=a["rejection_reason"])
         for a in conn.execute(
@@ -238,7 +258,7 @@ def get_decision(conn, id: str | None, slug: str | None) -> models.DecisionData:
                               verdict=r["verdict"], notes=r["notes"])
         for r in conn.execute(
             "SELECT id::text AS id, due_on, done_on, verdict::text AS verdict, notes "
-            "FROM review WHERE decision_id = %s ORDER BY due_on", (did,)).fetchall()
+            "FROM review WHERE decision_id = %s ORDER BY due_on, id", (did,)).fetchall()
     ]
 
     expectation = None
@@ -262,7 +282,7 @@ def get_decision(conn, id: str | None, slug: str | None) -> models.DecisionData:
           LEFT JOIN person pp ON pp.id = pv.principal_person_id
           LEFT JOIN person pa ON pa.id = pv.attested_by
          WHERE pv.object_type = 'decision' AND pv.object_id = %s
-         ORDER BY pv.created_at LIMIT 1
+         ORDER BY pv.created_at, pv.id LIMIT 1
         """, (did,)).fetchone()
 
     return models.DecisionData(
@@ -294,6 +314,7 @@ def pending_reviews(conn, owner_email: str | None, project: str | None, overdue_
          WHERE r.done_on IS NULL
            AND (%(owner)s::text IS NULL OR lower(p.email) = lower(%(owner)s))
            AND (%(project)s::text IS NULL OR pr.name ILIKE '%%' || %(project)s || '%%')
+         ORDER BY r.due_on, d.id, r.id
         """,
         {"owner": owner_email, "project": project},
     ).fetchall()
@@ -306,7 +327,9 @@ def pending_reviews(conn, owner_email: str | None, project: str | None, overdue_
             review_id=r["review_id"], decision_id=r["decision_id"], slug=r["slug"],
             title=r["title"], due_on=r["due_on"].isoformat(), overdue_days=overdue,
             owner=r["owner"], project=r["project"]))
-    reviews.sort(key=lambda r: r.overdue_days, reverse=True)
+    # Mais vencida primeiro; decisão e revisão desempatam, para a ordem não
+    # depender do plano de execução.
+    reviews.sort(key=lambda r: (-r.overdue_days, r.decision_id, r.review_id))
 
     unattested: list[models.UnattestedItem] = []
     if include_unattested:

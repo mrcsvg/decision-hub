@@ -77,3 +77,50 @@ async def refuse_expectation(ctx, call_next):
                 is_error=True, content=[t.TextContent(type="text", text=text)]
             )
     return await call_next(ctx)
+
+
+NUL_REFUSAL = (
+    "Parâmetro inválido: texto com caractere nulo (\\x00). Nada foi gravado."
+)
+
+
+def nul_paths(arguments: Any) -> list[str]:
+    """Caminhos das chaves ou valores de texto que contêm o caractere nulo.
+
+    O Postgres não guarda \\x00 em text. Tirá-lo em silêncio mudaria o dado;
+    recusar com a mensagem certa deixa o agente corrigir e chamar de novo.
+    """
+    found: set[str] = set()
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, str):
+            if "\x00" in node:
+                found.add(path or "(argumento)")
+        elif isinstance(node, Mapping):
+            for key, value in node.items():
+                child = f"{path}.{key}" if path else str(key)
+                if isinstance(key, str) and "\x00" in key:
+                    found.add(child.replace("\x00", "\\x00"))
+                walk(value, child.replace("\x00", "\\x00"))
+        elif isinstance(node, list | tuple):
+            for index, item in enumerate(node):
+                walk(item, f"{path}[{index}]")
+
+    walk(arguments, "")
+    return sorted(found)
+
+
+async def refuse_nul(ctx, call_next):
+    """Middleware: recusa `tools/call` com \\x00 em qualquer texto dos argumentos.
+
+    Vale para as seis ferramentas de uma vez: é na fronteira, antes de qualquer
+    SQL, que o erro ainda pode ser explicado ao agente.
+    """
+    if ctx.method == "tools/call" and isinstance(ctx.params, Mapping):
+        offending = nul_paths(ctx.params.get("arguments") or {})
+        if offending:
+            text = f"{NUL_REFUSAL} Campos: {', '.join(offending)}. Chame de novo sem ele."
+            return t.CallToolResult(
+                is_error=True, content=[t.TextContent(type="text", text=text)]
+            )
+    return await call_next(ctx)

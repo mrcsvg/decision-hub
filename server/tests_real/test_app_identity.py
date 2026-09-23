@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import base64
 import json
+from types import SimpleNamespace
 
-from decision_memory.guard import forbidden_keys
+import mcp.types as t
+from conftest import run
+
+from decision_memory.guard import forbidden_keys, nul_paths, refuse_nul
 from decision_memory.identity import (
     acting_as,
     current_client,
@@ -147,3 +151,26 @@ def test_argumentos_limpos_ou_nao_dict_passam():
     assert forbidden_keys(None) == []
     assert forbidden_keys(["confidence"]) == []
     assert forbidden_keys("confidence") == []
+
+
+def _through(middleware, arguments):
+    ctx = SimpleNamespace(method="tools/call", params={"name": "x", "arguments": arguments})
+
+    async def call_next(_ctx):
+        return "chamou a ferramenta"
+
+    return run(middleware(ctx, call_next))
+
+
+def test_caractere_nulo_e_recusado_antes_da_ferramenta():
+    for args in ({"query": "a\x00b"}, {"tags": ["ok", "x\x00"]},
+                 {"meta": {"nota": "\x00"}}, {"chave\x00": "valor"}):
+        res = _through(refuse_nul, args)
+        assert isinstance(res, t.CallToolResult) and res.is_error, args
+        assert "\\x00" in res.content[0].text and "Nada foi gravado" in res.content[0].text
+
+
+def test_sem_caractere_nulo_segue_para_a_ferramenta():
+    assert _through(refuse_nul, {"query": "checkout", "limit": 3, "tags": None}) \
+        == "chamou a ferramenta"
+    assert nul_paths({"a": ["x", {"b": "y\x00"}]}) == ["a[1].b"]

@@ -5,6 +5,7 @@ import re
 import pytest
 from conftest import ROOT, run
 
+from decision_memory import guard
 from decision_memory.server import build_server
 
 EXPECTED_TOOLS = {"search_evidence", "get_decision", "propose_decision",
@@ -50,3 +51,10 @@ def test_nenhum_schema_de_entrada_pede_confianca_ou_expectativa(tools):
         campos = " ".join(tool.input_schema.get("properties", {})).lower()
         for termo in ("confidence", "confianca", "expectation", "expectativa", "certeza"):
             assert termo not in campos, f"{name} expõe '{termo}'"
+
+
+def test_ordem_das_middlewares(pool):
+    """Identidade primeiro; depois as recusas, antes de qualquer ferramenta."""
+    nossas = build_server(pool).middleware[-3:]
+    assert nossas[0].__name__ == "resolve_identity"
+    assert nossas[1:] == [guard.refuse_expectation, guard.refuse_nul]

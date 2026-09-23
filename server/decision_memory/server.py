@@ -67,6 +67,14 @@ NOTHING_FOUND = (
 )
 
 
+# Consulta ecoada no resumo em texto; o `structured_content` leva a íntegra.
+MAX_ECHO = 120
+
+
+def _echo(query: str) -> str:
+    return query if len(query) <= MAX_ECHO else query[:MAX_ECHO] + "…"
+
+
 def _text(*parts: str) -> list[t.TextContent]:
     return [t.TextContent(type="text", text=" ".join(p for p in parts if p))]
 
@@ -93,11 +101,16 @@ def with_db(pool: ConnectionPool, work: Callable[[psycopg.Connection], T]) -> T:
             return work(conn)
     except ToolError:
         raise
-    except psycopg.Error as exc:
+    except Exception as exc:
+        # Qualquer outra falha, de banco ou não, sai com a mesma mensagem: o
+        # detalhe (SQL, traceback) fica no log, achável pela ref.
         ref = uuid.uuid4().hex[:8]
-        bug = isinstance(exc, psycopg.errors.InsufficientPrivilege)
-        log.error(json.dumps({"event": "db_error", "ref": ref, "bug": bug,
-                              "sqlstate": exc.sqlstate, "error": str(exc)}))
+        bug = not isinstance(exc, psycopg.OperationalError)
+        log.error(json.dumps({"event": "db_error" if isinstance(exc, psycopg.Error)
+                              else "internal_error",
+                              "ref": ref, "bug": bug, "type": type(exc).__name__,
+                              "sqlstate": getattr(exc, "sqlstate", None),
+                              "error": str(exc)}))
         raise ToolError(
             f"Erro interno ao acessar o registro (ref {ref}). Nada foi gravado. "
             "Tente de novo; se persistir, avise quem administra o servidor."
@@ -137,8 +150,8 @@ def build_server(pool: ConnectionPool, audiences: tuple[str, ...] = ()) -> MCPSe
             data=models.SearchData(query=query, items=items, total=total,
                                    note=None if items else NOTHING_FOUND),
             pending=block)
-        summary = (f"{len(items)} de {total} resultados para '{query}'." if items
-                   else f"Nenhum resultado para '{query}'.")
+        summary = (f"{len(items)} de {total} resultados para '{_echo(query)}'." if items
+                   else f"Nenhum resultado para '{_echo(query)}'.")
         return _result(summary, body, block)
 
     @server.tool(name="get_decision", description=DESCRIPTIONS["get_decision"], annotations=READ)
@@ -179,7 +192,8 @@ def build_server(pool: ConnectionPool, audiences: tuple[str, ...] = ()) -> MCPSe
 
     # As escritas entram aqui (tarefa 10).
 
-    # Ordem importa: a identidade é resolvida antes da guarda e da ferramenta.
+    # Ordem importa: a identidade é resolvida antes das recusas e da ferramenta.
     server.middleware.append(identity.middleware(audiences))
     server.middleware.append(guard.refuse_expectation)
+    server.middleware.append(guard.refuse_nul)
     return server
