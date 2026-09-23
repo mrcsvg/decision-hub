@@ -36,10 +36,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # O banco sobe vazio a cada execução: o schema é aplicado do zero e as
-      # invariantes rodam numa transação desfeita ao final.
-      - name: Aplicar o schema e rodar as invariantes
-        run: psql -v ON_ERROR_STOP=1 -f db/schema.sql -f db/test_invariants.sql
+      # O banco sobe vazio a cada execução: o schema e o papel dm_app são
+      # aplicados do zero e as invariantes rodam numa transação desfeita ao
+      # final.
+      - name: Aplicar o schema e os grants e rodar as invariantes
+        run: psql -v ON_ERROR_STOP=1 -f db/schema.sql -f db/grants.sql -f db/test_invariants.sql
 
   spec:
     name: Exemplos contra o contrato

@@ -43,6 +43,7 @@ Existem boas ferramentas para cada tipo de evidência isolado — plataformas de
 │   └── examples/
 ├── db/
 │   ├── schema.sql                     modelo lógico em PostgreSQL
+│   ├── grants.sql                     papel dm_app do servidor MCP: só lê e acrescenta
 │   ├── test_invariants.sql
 │   └── migrations/                    o que schema.sql ganhou, para banco já criado
 └── server/                            stub MCP sobre fixtures, para testar invocação
@@ -53,10 +54,11 @@ Existem boas ferramentas para cada tipo de evidência isolado — plataformas de
 ```bash
 createdb decision_memory
 psql -v ON_ERROR_STOP=1 -d decision_memory -f db/schema.sql
+psql -v ON_ERROR_STOP=1 -d decision_memory -f db/grants.sql
 psql -v ON_ERROR_STOP=1 -d decision_memory -f db/test_invariants.sql
 ```
 
-Requer PostgreSQL 14 ou superior com a extensão `btree_gist`. Os testes rodam numa transação desfeita ao final e verificam as invariantes que o banco garante sozinho: expectativa append-only e anterior ao desfecho, vínculo organizacional na data da decisão, vigências sem sobreposição e ingestão idempotente.
+Requer PostgreSQL 14 ou superior com a extensão `btree_gist`. Os testes rodam numa transação desfeita ao final e verificam as invariantes que o banco garante sozinho: expectativa append-only e anterior ao desfecho, vínculo organizacional na data da decisão, vigências sem sobreposição, ingestão idempotente e o papel `dm_app`, que só lê e acrescenta.
 
 ### Instância no Cloud SQL
 

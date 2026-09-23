@@ -72,7 +72,7 @@ ao final.
 
 ```bash
 createdb decision_memory_test
-psql -v ON_ERROR_STOP=1 -d decision_memory_test -f db/schema.sql -f db/test_invariants.sql
+psql -v ON_ERROR_STOP=1 -d decision_memory_test -f db/schema.sql -f db/grants.sql -f db/test_invariants.sql
 dropdb decision_memory_test
 ```
 
@@ -83,7 +83,7 @@ docker run --rm -d --name dm-pg -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=decision_memory -p 5432:5432 postgres:16
 until pg_isready -h localhost -U postgres -q; do sleep 1; done
 PGHOST=localhost PGUSER=postgres PGPASSWORD=postgres PGDATABASE=decision_memory \
-  psql -v ON_ERROR_STOP=1 -f db/schema.sql -f db/test_invariants.sql
+  psql -v ON_ERROR_STOP=1 -f db/schema.sql -f db/grants.sql -f db/test_invariants.sql
 docker rm -f dm-pg
 ```
 

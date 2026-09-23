@@ -1,5 +1,5 @@
 -- Testes das invariantes de db/schema.sql.
--- Uso: psql -v ON_ERROR_STOP=1 -f db/schema.sql -f db/test_invariants.sql
+-- Uso: psql -v ON_ERROR_STOP=1 -f db/schema.sql -f db/grants.sql -f db/test_invariants.sql
 -- Tudo roda numa transação desfeita ao final; o banco não é alterado.
 
 BEGIN;
@@ -110,6 +110,50 @@ DO $$ BEGIN
     RAISE EXCEPTION 'FALHOU: chave de idempotência repetida foi aceita';
 EXCEPTION WHEN unique_violation THEN NULL;
 END $$;
+
+-- 9. O papel do servidor MCP só lê e acrescenta -------------------------------
+-- Expectativa é da pessoa, na atestação (ADR 0002); o banco garante isso mesmo
+-- que o código do servidor erre.
+SET ROLE dm_app;
+
+DO $$ BEGIN
+    INSERT INTO expectation (decision_id, recorded_by, confidence, expected_metric,
+                             expected_magnitude, due_on)
+    VALUES ('00000000-0000-0000-0000-0000000000d1', '00000000-0000-0000-0000-000000000001',
+            0.5, 'conversão', '+1 p.p.', '2030-01-01');
+    RAISE EXCEPTION 'FALHOU: dm_app gravou expectativa';
+EXCEPTION WHEN insufficient_privilege THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    INSERT INTO review (decision_id, due_on)
+    VALUES ('00000000-0000-0000-0000-0000000000d1', '2030-01-01');
+    RAISE EXCEPTION 'FALHOU: dm_app gravou revisão';
+EXCEPTION WHEN insufficient_privilege THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    UPDATE decision SET title = 'x' WHERE id = '00000000-0000-0000-0000-0000000000d1';
+    RAISE EXCEPTION 'FALHOU: dm_app alterou decisão';
+EXCEPTION WHEN insufficient_privilege THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    DELETE FROM evidence;
+    RAISE EXCEPTION 'FALHOU: dm_app apagou evidência';
+EXCEPTION WHEN insufficient_privilege THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    INSERT INTO person (name, email) VALUES ('Intrusa', 'intrusa@example.com');
+    RAISE EXCEPTION 'FALHOU: dm_app cadastrou pessoa';
+EXCEPTION WHEN insufficient_privilege THEN NULL;
+END $$;
+
+-- e acrescenta o que as ferramentas precisam
+INSERT INTO tag (name) VALUES ('papel-dm-app');
+
+RESET ROLE;
 
 \echo 'Todas as invariantes passaram.'
 
