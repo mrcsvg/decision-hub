@@ -17,7 +17,8 @@ def connection_kwargs(password: str | None = None) -> dict:
 
     `options` vai como parâmetro de partida da sessão, e por isso vale para
     qualquer forma de URL — host TCP ou o socket Unix do Cloud SQL
-    (`?host=/cloudsql/...`). Se a URL trouxer `options` própria, esta prevalece.
+    (`?host=/cloudsql/...`). Se a URL trouxer `options` própria, ela é
+    substituída por esta, não combinada: outro `-c` posto na URL se perde.
     """
     kwargs: dict = {"options": f"-c statement_timeout={STATEMENT_TIMEOUT_MS}"}
     if password:

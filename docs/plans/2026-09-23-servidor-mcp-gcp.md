@@ -463,7 +463,8 @@ def connection_kwargs(password: str | None = None) -> dict:
 
     `options` vai como parâmetro de partida da sessão, e por isso vale para
     qualquer forma de URL — host TCP ou o socket Unix do Cloud SQL
-    (`?host=/cloudsql/...`). Se a URL trouxer `options` própria, esta prevalece.
+    (`?host=/cloudsql/...`). Se a URL trouxer `options` própria, ela é
+    substituída por esta, não combinada: outro `-c` posto na URL se perde.
     """
     kwargs: dict = {"options": f"-c statement_timeout={STATEMENT_TIMEOUT_MS}"}
     if password:
@@ -1686,7 +1687,11 @@ _CANDIDATE = (
 
 
 def _candidate(vec: str, tags_sql: str) -> str:
-    return _CANDIDATE.format(vec=vec, tag_vec=_folded_tsvector(f"array_to_string({tags_sql}, ' ')"))
+    # Ponto e barra viram espaço antes do parser: sem isso, 'growth/pricing'
+    # seria um caminho e 'v2.checkout' um host, cada um um token só, e a tag não
+    # casaria palavra a palavra como em `terms()`.
+    tag_text = f"translate(array_to_string({tags_sql}, ' '), './', '  ')"
+    return _CANDIDATE.format(vec=vec, tag_vec=_folded_tsvector(tag_text))
 
 
 _EV_TAGS = "ARRAY(SELECT t.name FROM evidence_tag x JOIN tag t ON t.id = x.tag_id WHERE x.evidence_id = e.id)"
@@ -2058,11 +2063,13 @@ def test_ordem_das_middlewares(pool):
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager
 
 import psycopg
 import pytest
 from conftest import run
 from mcp.server.mcpserver.exceptions import ToolError
+from psycopg.types.json import Jsonb
 
 from decision_memory import reads
 from decision_memory.guard import fold
@@ -2100,39 +2107,39 @@ def test_busca_sem_resultado_manda_dizer_isso_em_voz_alta(server):
     assert "explicitamente" in data["note"]
 
 
-NEGATE_EFFECT = (
-    "UPDATE evidence SET normalized = jsonb_set(normalized, '{effect,point}', "
-    "to_jsonb(-(normalized->'effect'->>'point')::numeric)) "
-    "WHERE normalized->'effect'->>'point' IS NOT NULL"
-)
+SET_POINT = ("UPDATE evidence SET normalized = jsonb_set(normalized, '{effect,point}', %s) "
+             "WHERE id = %s")
 
 
 def test_ordem_da_busca_nao_depende_do_efeito_nem_da_forca(server, admin_conn):
     """ADR 0003: ranquear por efeito compara grandezas de origens diferentes.
 
-    Inverter o sinal de todo efeito inverte a ordem entre eles, e rebaixar a
-    força só do primeiro colocado o tiraria do topo: se a busca olhasse para
-    qualquer dos dois, a ordem mudaria.
+    Os efeitos dos resultados são redistribuídos na ordem inversa do ranking:
+    o primeiro fica com o valor do último, e assim por diante. Qualquer
+    ordenação que olhe para o efeito — sinal, magnitude, o que for — se
+    inverteria. Rebaixar a força só do primeiro colocado o tiraria do topo se a
+    busca olhasse para a força.
     """
     consulta = {"query": "checkout conversão", "include": ["evidence"]}
     antes = _ids(server, consulta)
-    com_efeito = [r[0] for r in admin_conn.execute(
-        "SELECT id::text FROM evidence WHERE id::text = ANY(%s) "
-        "AND normalized->'effect'->>'point' IS NOT NULL", (antes,))]
-    pontos = {r[0] for r in admin_conn.execute(
-        "SELECT normalized->'effect'->>'point' FROM evidence WHERE id::text = ANY(%s)",
-        (com_efeito,))}
-    assert len(com_efeito) >= 2 and len(pontos) >= 2, "o teste precisa de efeitos distintos"
+    pontos = dict(admin_conn.execute(
+        "SELECT id::text, normalized->'effect'->'point' FROM evidence WHERE id::text = ANY(%s) "
+        "AND normalized->'effect'->>'point' IS NOT NULL", (antes,)).fetchall())
+    com_efeito = [i for i in antes if i in pontos]  # na ordem do ranking
+    assert len(com_efeito) >= 2 and len({str(pontos[i]) for i in com_efeito}) >= 2, \
+        "o teste precisa de ao menos dois efeitos distintos"
     primeiro = antes[0]
     forca = admin_conn.execute("SELECT strength FROM evidence WHERE id = %s",
                                (primeiro,)).fetchone()[0]
     assert forca == "causal"
-    admin_conn.execute(NEGATE_EFFECT)
-    admin_conn.execute("UPDATE evidence SET strength = 'anecdotal' WHERE id = %s", (primeiro,))
     try:
+        for eid, ponto in zip(com_efeito, reversed([pontos[i] for i in com_efeito]), strict=True):
+            admin_conn.execute(SET_POINT, (Jsonb(ponto), eid))
+        admin_conn.execute("UPDATE evidence SET strength = 'anecdotal' WHERE id = %s", (primeiro,))
         depois = _ids(server, consulta)
     finally:
-        admin_conn.execute(NEGATE_EFFECT)
+        for eid in com_efeito:
+            admin_conn.execute(SET_POINT, (Jsonb(pontos[eid]), eid))
         admin_conn.execute("UPDATE evidence SET strength = %s WHERE id = %s", (forca, primeiro))
     assert antes == depois
 
@@ -2243,22 +2250,39 @@ def test_operadores_de_tsquery_nas_tags_sao_inofensivos(server):
     assert not res.is_error
 
 
-@pytest.fixture
-def evidencia_com_tag_composta(admin_conn):
-    """Evidência cuja única ligação com "página única" é a tag hifenizada."""
+@contextmanager
+def _evidencia_com_tags(admin_conn, nomes):
+    """Evidência cuja única ligação com as palavras das tags são as próprias tags."""
     eid = admin_conn.execute(
         "INSERT INTO evidence (kind, title, summary) VALUES ('analysis', "
         "'Registro zzqk de teste', 'Texto sem as palavras da tag') RETURNING id::text"
     ).fetchone()[0]
-    tid = admin_conn.execute(
-        "INSERT INTO tag (name) VALUES ('pagina-unica') RETURNING id").fetchone()[0]
-    admin_conn.execute("INSERT INTO evidence_tag VALUES (%s, %s)", (eid, tid))
+    tids = []
     try:
+        for nome in nomes:
+            tids.append(admin_conn.execute(
+                "INSERT INTO tag (name) VALUES (%s) RETURNING id", (nome,)).fetchone()[0])
+            admin_conn.execute("INSERT INTO evidence_tag VALUES (%s, %s)", (eid, tids[-1]))
         yield eid
     finally:
         admin_conn.execute("DELETE FROM evidence_tag WHERE evidence_id = %s", (eid,))
         admin_conn.execute("DELETE FROM evidence WHERE id = %s", (eid,))
-        admin_conn.execute("DELETE FROM tag WHERE id = %s", (tid,))
+        admin_conn.execute("DELETE FROM tag WHERE id = ANY(%s)", (tids,))
+
+
+@pytest.fixture
+def evidencia_com_tag_composta(admin_conn):
+    with _evidencia_com_tags(admin_conn, ["pagina-unica"]) as eid:
+        yield eid
+
+
+def test_tag_com_barra_ou_ponto_casa_por_palavra(server, admin_conn):
+    """O parser do Postgres guardaria 'growth/pricing' como caminho, inteiro."""
+    with _evidencia_com_tags(admin_conn, ["growth/pricing", "v2.zzfrete"]) as eid:
+        assert eid in _ids(server, {"query": "pricing"})
+        assert eid in _ids(server, {"query": "growth"})
+        assert eid in _ids(server, {"query": "zzfrete"})
+        assert _ids(server, {"query": "", "tags": ["growth/pricing"]}) == [eid]
 
 
 def test_tag_composta_casa_por_palavra(server, evidencia_com_tag_composta):

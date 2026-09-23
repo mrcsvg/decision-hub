@@ -70,7 +70,11 @@ _CANDIDATE = (
 
 
 def _candidate(vec: str, tags_sql: str) -> str:
-    return _CANDIDATE.format(vec=vec, tag_vec=_folded_tsvector(f"array_to_string({tags_sql}, ' ')"))
+    # Ponto e barra viram espaço antes do parser: sem isso, 'growth/pricing'
+    # seria um caminho e 'v2.checkout' um host, cada um um token só, e a tag não
+    # casaria palavra a palavra como em `terms()`.
+    tag_text = f"translate(array_to_string({tags_sql}, ' '), './', '  ')"
+    return _CANDIDATE.format(vec=vec, tag_vec=_folded_tsvector(tag_text))
 
 
 _EV_TAGS = "ARRAY(SELECT t.name FROM evidence_tag x JOIN tag t ON t.id = x.tag_id WHERE x.evidence_id = e.id)"
