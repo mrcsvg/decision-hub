@@ -91,6 +91,10 @@ SQL
 PYTHONPATH=server .venv/bin/python -m decision_memory.seed --database-url "$ADMIN" \
   --attested-by voce@exemplo.com --people pessoas.csv
 
+# 2b. Opcional, para demonstração: cargos, áreas, vínculos, indicadores e medições
+#     fictícios, ligados às fixtures (as cinco tabelas que o corpus não cobre).
+psql "$ADMIN" -v ON_ERROR_STOP=1 -f db/demo.sql
+
 # 3. Segredo e conta de serviço
 printf '%s' "$APP_PASSWORD" | gcloud secrets create dm-app-password --data-file=- --project $PROJECT
 gcloud iam service-accounts create dm-server --project $PROJECT
