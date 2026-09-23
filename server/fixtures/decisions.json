@@ -1,5 +1,33 @@
 [
   {
+    "id": "dec-checkout-pagina-unica",
+    "slug": "checkout-pagina-unica",
+    "title": "Colapsar o checkout numa página única",
+    "context": "O checkout tinha quatro etapas e o maior abandono estava entre elas. A hipótese era que menos páginas reduziriam o esforço.",
+    "description": "Lançar o checkout em página única para todos os clientes, validando antes com um experimento A/B de quatro semanas.",
+    "door": "two_way",
+    "decided_on": "2025-08-25",
+    "decider": "p-bruno",
+    "project": "proj-checkout",
+    "state": "attested",
+    "tags": ["checkout", "conversao"],
+    "alternatives": [
+      {
+        "description": "Manter as quatro etapas e encurtar os formulários",
+        "rejection_reason": "Ganho pequeno diante do abandono entre etapas."
+      }
+    ],
+    "evidence": [
+      {
+        "evidence_id": "ev-checkout-pagina-unica",
+        "role": "contradicts",
+        "weight": 0.9,
+        "note": "O experimento de validação: a conversão caiu e a página única foi revertida."
+      }
+    ],
+    "learnings": ["ln-paginas"]
+  },
+  {
     "id": "dec-remover-confirmacao",
     "slug": "remover-confirmacao-checkout",
     "title": "Remover a etapa de confirmação do checkout",

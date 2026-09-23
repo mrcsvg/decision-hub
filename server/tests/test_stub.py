@@ -1,6 +1,6 @@
 """Testes do stub: as regras do projeto viram asserção.
 
-O que está aqui não é cobertura de linha, é guarda-corpo: seis ferramentas,
+O que está aqui não é cobertura de linha, é guarda-corpo: oito ferramentas,
 nenhuma expectativa vinda de agente, nenhum ranqueamento por efeito e um bloco
 `pending` que nunca some.
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -26,7 +27,11 @@ EXPECTED_TOOLS = {
     "attach_evidence",
     "record_learning",
     "list_pending_reviews",
+    "get_topic_timeline",
+    "find_related",
 }
+SOMENTE_LEITURA = {"search_evidence", "get_decision", "list_pending_reviews",
+                   "get_topic_timeline", "find_related"}
 
 
 def run(coro):
@@ -46,9 +51,9 @@ def tools(server):
 # --------------------------------------------------------------- superfície
 
 
-def test_sao_exatamente_seis_ferramentas(tools):
+def test_sao_exatamente_oito_ferramentas(tools):
     assert set(tools) == EXPECTED_TOOLS
-    assert len(tools) == 6, "não crie a sétima ferramenta sem ADR"
+    assert len(tools) == 8, "não crie a nona ferramenta sem ADR"
 
 
 def test_toda_ferramenta_declara_output_schema(tools):
@@ -57,13 +62,12 @@ def test_toda_ferramenta_declara_output_schema(tools):
 
 
 def test_anotacoes_batem_com_mcp_tools(tools):
-    somente_leitura = {"search_evidence", "get_decision", "list_pending_reviews"}
     for name, tool in tools.items():
         annotations = tool.annotations
         assert annotations is not None, name
         assert annotations.open_world_hint is False, name
-        assert annotations.read_only_hint is (name in somente_leitura), name
-        if name not in somente_leitura:
+        assert annotations.read_only_hint is (name in SOMENTE_LEITURA), name
+        if name not in SOMENTE_LEITURA:
             assert annotations.destructive_hint is False, name
 
 
@@ -314,6 +318,8 @@ def test_bloco_pending_nunca_esta_ausente(server, tools):
             "evidence_id": "ev-busca-zero-resultados",
         },
         "record_learning": {"summary": "uma afirmação reutilizável qualquer", "decision_ids": ["d"]},
+        "get_topic_timeline": {"query": "checkout"},
+        "find_related": {"id": "dec-busca-sinonimos"},
     }
     assert set(chamadas) == EXPECTED_TOOLS
     for name, args in chamadas.items():
@@ -326,6 +332,112 @@ def test_pending_prioriza_revisao_da_mesma_tag(server):
     res = run(server.call_tool("search_evidence", {"query": "onboarding ativação"}))
     due = res.structured_content["pending"]["reviews_due"]
     assert due[0]["decision_id"] == "dec-onboarding-tres-etapas"
+
+
+# ---------------------------------------------------------- linha do tempo
+
+
+def _timeline(server, args):
+    return run(server.call_tool("get_topic_timeline", args)).structured_content["data"]
+
+
+def test_linha_do_tempo_conta_a_trajetoria_em_ordem(server):
+    eventos = _timeline(server, {"query": "checkout"})["events"]
+    assert [(e["type"], e["id"]) for e in eventos] == [
+        ("decision", "dec-checkout-pagina-unica"),
+        ("review", "rv-pagina-unica"),
+        ("learning", "ln-paginas"),
+        ("decision", "dec-remover-confirmacao"),
+        ("learning", "ln-confirmacao"),
+    ]
+    datas = [e["on"] for e in eventos]
+    assert datas == sorted(datas)
+    revisao = eventos[1]
+    assert revisao["verdict"] == "worse"
+    assert revisao["decision_id"] == "dec-checkout-pagina-unica"
+
+
+def test_linha_do_tempo_so_traz_revisao_realizada(server):
+    eventos = _timeline(server, {"query": "checkout"})["events"]
+    assert "rv-checkout" not in {e["id"] for e in eventos}, "revisão aberta é do pending"
+
+
+def test_linha_do_tempo_nunca_traz_expectativa(server):
+    """ADR 0006: confiança ao lado de desfecho vira calibração informal."""
+    res = run(server.call_tool("get_topic_timeline", {"query": "checkout"}))
+    texto = json.dumps(res.structured_content["data"]).lower()
+    assert "dec-remover-confirmacao" in texto, "a decisão atestada tem de estar na amostra"
+    for termo in ("confidence", "expectation", "expected_", "0.7"):
+        assert termo not in texto, termo
+
+
+def test_linha_do_tempo_nao_tem_evidencia_como_evento(server):
+    eventos = _timeline(server, {"query": "checkout conversão"})["events"]
+    assert eventos
+    assert {e["type"] for e in eventos} <= {"decision", "review", "learning"}
+
+
+def test_linha_do_tempo_sem_resultado_manda_dizer_isso(server):
+    data = _timeline(server, {"query": "programa de fidelidade por pontos"})
+    assert data["events"] == []
+    assert "explicitamente" in data["note"]
+
+
+def test_limite_da_linha_do_tempo_corta_por_relevancia(server):
+    data = _timeline(server, {"query": "checkout", "limit": 1})
+    assert data["total"] == 4
+    assert [e["type"] for e in data["events"] if e["type"] != "review"] == ["decision"]
+
+
+# ------------------------------------------------------------- relacionadas
+
+
+def _related(server, args):
+    return run(server.call_tool("find_related", args)).structured_content["data"]
+
+
+def test_relacionada_por_evidencia_e_licao_vem_antes_da_por_tag(server):
+    data = _related(server, {"slug": "remover-confirmacao-checkout"})
+    ids = [r["decision_id"] for r in data["related"]]
+    assert ids[0] == "dec-checkout-pagina-unica"
+    primeira = data["related"][0]
+    assert [e["evidence_id"] for e in primeira["shared_evidence"]] == ["ev-checkout-pagina-unica"]
+    assert primeira["shared_evidence"][0]["role_here"] == "contradicts"
+    assert [ln["learning_id"] for ln in primeira["shared_learnings"]] == ["ln-paginas"]
+    # Só por tag, a mais recente primeiro.
+    assert ids[1:] == ["dec-frete-gratis-99", "dec-busca-sinonimos"]
+
+
+def test_relacionadas_nao_incluem_a_propria_decisao(server):
+    data = _related(server, {"id": "dec-remover-confirmacao"})
+    assert "dec-remover-confirmacao" not in {r["decision_id"] for r in data["related"]}
+
+
+def test_decisao_isolada_manda_dizer_isso(server):
+    data = _related(server, {"id": "dec-manter-devolucao-30-dias"})
+    assert data["related"] == []
+    assert data["note"]
+
+
+def test_relacionada_inexistente_diz_o_que_fazer(server):
+    with pytest.raises(Exception) as excinfo:
+        run(server.call_tool("find_related", {"id": "dec-nao-existe"}))
+    assert "search_evidence" in str(excinfo.value)
+
+
+def test_ordem_das_relacionadas_nao_depende_do_efeito():
+    """ADR 0003, como na busca."""
+    original = load_corpus()
+    inflado = replace(original, evidence=copy.deepcopy(original.evidence))
+    for item in inflado.evidence:
+        effect = item.get("record", {}).get("effect")
+        if effect:
+            effect["point"] = -effect["point"] * 100
+
+    consulta = {"id": "dec-remover-confirmacao"}
+    antes = _related(build_server(original), consulta)["related"]
+    depois = _related(build_server(inflado), consulta)["related"]
+    assert antes == depois
 
 
 # ---------------------------------------------------------------- fixtures

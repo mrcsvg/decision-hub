@@ -1,5 +1,13 @@
 [
   {
+    "id": "rv-pagina-unica",
+    "decision_id": "dec-checkout-pagina-unica",
+    "due_on": "2025-10-01",
+    "done_on": "2025-10-06",
+    "verdict": "worse",
+    "notes": "A conversão do checkout caiu 1,4% no experimento; voltamos às quatro etapas."
+  },
+  {
     "id": "rv-onboarding",
     "decision_id": "dec-onboarding-tres-etapas",
     "due_on": "2026-09-15",

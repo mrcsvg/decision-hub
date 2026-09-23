@@ -14,7 +14,7 @@
     "recorded_on": "2025-10-06",
     "state": "attested",
     "tags": ["checkout", "conversao", "formulario"],
-    "from_decisions": ["dec-remover-confirmacao"],
+    "from_decisions": ["dec-checkout-pagina-unica", "dec-remover-confirmacao"],
     "from_evidence": ["ev-checkout-pagina-unica"]
   },
   {
