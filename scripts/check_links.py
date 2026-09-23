@@ -51,7 +51,8 @@ def slugify(heading: str) -> str:
     """Reproduz a âncora que o GitHub gera para um título."""
     text = re.sub(r"`([^`]*)`", r"\1", heading)
     text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)
-    text = re.sub(r"[*_~]", "", text)
+    text = re.sub(r"[*~]", "", text)
+    text = re.sub(r"(?<!\w)_+|_+(?!\w)", "", text)
     text = unicodedata.normalize("NFC", text).strip().lower()
     text = re.sub(r"[^\w\- ]", "", text, flags=re.UNICODE)
     return text.replace(" ", "-")

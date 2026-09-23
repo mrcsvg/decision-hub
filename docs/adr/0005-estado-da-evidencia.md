@@ -24,7 +24,7 @@ Em `decision` e `learning`, a coluna `state` continua sendo a fonte. O modelo fi
 
 ## Evidências
 
-- A divergência registrada em [`server/README.md`](../../server/README.md#divergências-em-relação-a-mcptoolsmd).
+- A divergência registrada em [`server/README.md`](../../server/README.md#divergências-em-relação-a-mcp_toolsmd).
 - `provenance` já aceita `object_type = 'evidence'` e já tem `attested_by`/`attested_at` em [`db/schema.sql`](../../db/schema.sql).
 
 ## Consequências
