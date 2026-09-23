@@ -443,7 +443,10 @@ def make_pool(url: str, password: str | None = None) -> ConnectionPool:
     kwargs: dict = {"row_factory": dict_row}
     if password:
         kwargs["password"] = password
-    return ConnectionPool(url, kwargs=kwargs, min_size=1, max_size=4, open=True)
+    # Cloud SQL e o Auth Proxy derrubam conexão ociosa: o pool testa a conexão
+    # antes de entregá-la e descarta as que ficaram paradas mais de 5 minutos.
+    return ConnectionPool(url, kwargs=kwargs, min_size=1, max_size=4, open=True,
+                          check=ConnectionPool.check_connection, max_idle=300)
 ```
 
 **Passo 5: harness de teste.** `server/tests_real/conftest.py`:
@@ -454,6 +457,11 @@ def make_pool(url: str, password: str | None = None) -> ConnectionPool:
 Exige DM_TEST_ADMIN_URL apontando para um banco vazio cujo nome termina em
 _test, conectado como superusuário. A sessão recria o schema public, então a
 suíte se recusa a rodar em qualquer outro banco.
+
+A instância Postgres inteira tem de ser dedicada aos testes: papéis valem para
+o cluster todo, e a suíte aplica grants.sql e troca a senha do papel dm_app.
+Por isso ela também se recusa a rodar fora da máquina local (localhost,
+127.0.0.1, ::1 ou socket Unix).
 """
 
 from __future__ import annotations
@@ -476,6 +484,7 @@ os.environ["DM_TODAY"] = "2026-09-22"
 ADMIN_URL = os.environ.get("DM_TEST_ADMIN_URL")
 APP_PASSWORD = "dm_app_test"
 ANA = "ana@exemplo.com.br"
+LOCAL_HOSTS = {"", "localhost", "127.0.0.1", "::1"}
 
 
 def run(coro):
@@ -486,9 +495,14 @@ def run(coro):
 def app_url() -> str:
     if not ADMIN_URL:
         pytest.skip("defina DM_TEST_ADMIN_URL (ver docs/plans/2026-09-23-servidor-mcp-gcp.md)")
-    dbname = conninfo_to_dict(ADMIN_URL).get("dbname", "")
+    info = conninfo_to_dict(ADMIN_URL)
+    dbname = info.get("dbname", "")
     if not dbname.endswith("_test"):
         pytest.fail(f"DM_TEST_ADMIN_URL aponta para '{dbname}'; a suíte só roda em banco *_test")
+    host = info.get("host") or ""
+    if host not in LOCAL_HOSTS and not host.startswith("/"):
+        pytest.fail(f"DM_TEST_ADMIN_URL aponta para o host '{host}'; a suíte altera o papel "
+                    "dm_app do cluster e só roda num Postgres local dedicado a testes")
 
     from decision_memory import seed
 
@@ -526,6 +540,8 @@ from __future__ import annotations
 import psycopg
 import pytest
 
+from decision_memory import seed
+
 
 def test_servidor_conecta_como_dm_app(pool):
     with pool.connection() as conn:
@@ -533,9 +549,14 @@ def test_servidor_conecta_como_dm_app(pool):
 
 
 def test_dm_app_nao_escreve_expectativa(pool):
+    # Linha válida (decisão proposta, sem revisão feita): só o privilégio a recusa.
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         with pool.connection() as conn:
-            conn.execute("DELETE FROM expectation")
+            conn.execute(
+                "INSERT INTO expectation (decision_id, recorded_by, confidence, expected_metric,"
+                " expected_magnitude, due_on) VALUES (%s, %s, 0.7, 'm', '+1 p.p.', '2027-01-01')",
+                (seed.fid("dec-push-diario"), seed.fid("p-ana")),
+            )
 ```
 
 **Passo 7: rodar e ver falhar.**
@@ -566,6 +587,12 @@ git commit -m "feat(server): esqueleto do servidor real e harness de teste com P
 ```python
 from __future__ import annotations
 
+import json
+import shutil
+
+import psycopg
+import pytest
+
 from decision_memory import seed
 
 FIXTURES = seed.DEFAULT_FIXTURES
@@ -573,7 +600,9 @@ FIXTURES = seed.DEFAULT_FIXTURES
 
 def _counts(conn):
     tables = ("person", "project", "evidence", "decision", "alternative", "learning",
-              "review", "expectation", "provenance", "decision_evidence")
+              "review", "expectation", "provenance", "decision_evidence", "tag",
+              "decision_tag", "evidence_tag", "learning_tag", "decision_learning",
+              "evidence_learning")
     return {t: conn.execute(f"SELECT count(*) AS n FROM {t}").fetchone()[0] for t in tables}
 
 
@@ -608,6 +637,39 @@ def test_evidencia_importada_nasce_atestada(admin_conn):
         " AND p.object_id = e.id AND p.attested_at IS NOT NULL)"
     ).fetchone()[0]
     assert sem_atestacao == 0
+
+
+def test_conflito_em_outra_chave_unica_levanta(admin_conn, tmp_path):
+    # Fixture nova com o e-mail de uma pessoa existente: id novo, e-mail repetido.
+    # A carga toda roda numa transação e é desfeita, então o banco não muda.
+    fixtures = tmp_path / "fixtures"
+    shutil.copytree(FIXTURES, fixtures)
+    people = json.loads((fixtures / "people.json").read_text(encoding="utf-8"))
+    people.append({"id": "p-ana-clone", "name": "Ana Clone", "email": "Ana@Exemplo.com.br "})
+    (fixtures / "people.json").write_text(json.dumps(people), encoding="utf-8")
+
+    antes = _counts(admin_conn)
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        seed.load(admin_conn, fixtures, attested_by_email="ana@exemplo.com.br")
+    assert _counts(admin_conn) == antes
+
+
+def test_atestador_desconhecido_levanta_value_error(admin_conn):
+    antes = _counts(admin_conn)
+    with pytest.raises(ValueError, match="ninguem@exemplo.com.br"):
+        seed.load(admin_conn, FIXTURES, attested_by_email="ninguem@exemplo.com.br")
+    assert _counts(admin_conn) == antes
+
+
+def test_csv_de_pessoas_normaliza_e_recusa_linha_vazia(tmp_path):
+    ok = tmp_path / "pessoas.csv"
+    ok.write_text("name,email\n Eva Lima , Eva@Exemplo.com \n", encoding="utf-8")
+    assert seed.read_people(ok) == [("Eva Lima", "eva@exemplo.com")]
+
+    ruim = tmp_path / "pessoas-ruim.csv"
+    ruim.write_text("name,email\nEva Lima,eva@exemplo.com\nSem Email,\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="linha 3"):
+        seed.read_people(ruim)
 ```
 
 `admin_conn` é autocommit e devolve tuplas (sem `dict_row`), por isso os índices numéricos.
@@ -631,6 +693,10 @@ Uso (com o Cloud SQL Auth Proxy na porta 5433):
 
 `--people` é um CSV com cabeçalho `name,email`. Tem e-mail de gente real: não
 versione.
+
+Só o conflito de id é tolerado (é o que torna a carga idempotente). Colisão em
+outra chave única — um e-mail já cadastrado com outro id, uma evidência com o
+mesmo (source_system, external_id) — levanta erro e desfaz a carga inteira.
 """
 
 from __future__ import annotations
@@ -653,8 +719,26 @@ def fid(fixture_id: str) -> uuid.UUID:
     return uuid.uuid5(NAMESPACE, f"fixtures:{fixture_id}")
 
 
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
 def person_id(email: str) -> uuid.UUID:
-    return uuid.uuid5(NAMESPACE, f"person:{email.strip().lower()}")
+    return uuid.uuid5(NAMESPACE, f"person:{normalize_email(email)}")
+
+
+def read_people(path: Path) -> list[tuple[str, str]]:
+    """Lê o CSV `name,email` de pessoas reais. Linha sem nome ou sem e-mail é erro."""
+    people: list[tuple[str, str]] = []
+    with path.open(encoding="utf-8", newline="") as handle:
+        # Linha 1 é o cabeçalho.
+        for line, row in enumerate(csv.DictReader(handle), start=2):
+            name = (row.get("name") or "").strip()
+            email = normalize_email(row.get("email") or "")
+            if not name or not email:
+                raise ValueError(f"{path}, linha {line}: nome e e-mail são obrigatórios")
+            people.append((name, email))
+    return people
 
 
 def _read(fixtures: Path, name: str) -> list[dict[str, Any]]:
@@ -692,24 +776,26 @@ def load(conn: psycopg.Connection, fixtures: Path = DEFAULT_FIXTURES, *,
     with conn.transaction(), conn.cursor() as cur:
         for p in _read(fixtures, "people"):
             cur.execute(
-                "INSERT INTO person (id, name, email) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-                (fid(p["id"]), p["name"], p["email"]),
+                "INSERT INTO person (id, name, email) VALUES (%s, %s, %s) "
+                "ON CONFLICT (id) DO NOTHING",
+                (fid(p["id"]), p["name"], normalize_email(p["email"])),
             )
         for name, email in extra_people:
             cur.execute(
-                "INSERT INTO person (id, name, email) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-                (person_id(email), name, email.strip().lower()),
+                "INSERT INTO person (id, name, email) VALUES (%s, %s, %s) "
+                "ON CONFLICT (id) DO NOTHING",
+                (person_id(email), name, normalize_email(email)),
             )
         row = cur.execute(
             "SELECT id FROM person WHERE lower(email) = lower(%s)", (attested_by_email,)
         ).fetchone()
         if row is None:
-            raise SystemExit(f"--attested-by {attested_by_email}: pessoa não cadastrada")
+            raise ValueError(f"atestador {attested_by_email}: pessoa não cadastrada")
         attester = row[0]
 
         for p in _read(fixtures, "projects"):
             cur.execute(
-                "INSERT INTO project (id, name) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                "INSERT INTO project (id, name) VALUES (%s, %s) ON CONFLICT (id) DO NOTHING",
                 (fid(p["id"]), p["name"]),
             )
 
@@ -719,7 +805,7 @@ def load(conn: psycopg.Connection, fixtures: Path = DEFAULT_FIXTURES, *,
                 INSERT INTO evidence (id, kind, title, summary, url, source_system, external_id,
                                       strength, conformance_level, normalized, imported_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (id) DO NOTHING
                 """,
                 (fid(e["id"]), e["kind"], e["title"], e.get("summary"), e.get("url"),
                  e.get("source_system"), e.get("external_id"), e.get("strength"),
@@ -736,7 +822,7 @@ def load(conn: psycopg.Connection, fixtures: Path = DEFAULT_FIXTURES, *,
                 INSERT INTO decision (id, slug, title, context, description, door, decided_on,
                                       decider_person_id, project_id, state)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (id) DO NOTHING
                 """,
                 (did, d["slug"], d["title"], d.get("context"), d["description"], d["door"],
                  d["decided_on"], fid(d["decider"]),
@@ -745,7 +831,7 @@ def load(conn: psycopg.Connection, fixtures: Path = DEFAULT_FIXTURES, *,
             for i, alt in enumerate(d.get("alternatives", [])):
                 cur.execute(
                     "INSERT INTO alternative (id, decision_id, description, rejection_reason) "
-                    "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                    "VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
                     (fid(f"{d['id']}:alt:{i}"), did, alt["description"], alt["rejection_reason"]),
                 )
             for link in d.get("evidence", []):
@@ -784,15 +870,21 @@ def load(conn: psycopg.Connection, fixtures: Path = DEFAULT_FIXTURES, *,
             lid = fid(ln["id"])
             cur.execute(
                 "INSERT INTO learning (id, summary, recorded_on, state) VALUES (%s, %s, %s, %s) "
-                "ON CONFLICT DO NOTHING",
+                "ON CONFLICT (id) DO NOTHING",
                 (lid, ln["summary"], ln["recorded_on"], ln["state"]),
             )
             for dec in ln.get("from_decisions", []):
-                cur.execute("INSERT INTO decision_learning VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                            (fid(dec), lid))
+                cur.execute(
+                    "INSERT INTO decision_learning (decision_id, learning_id) VALUES (%s, %s) "
+                    "ON CONFLICT DO NOTHING",
+                    (fid(dec), lid),
+                )
             for ev in ln.get("from_evidence", []):
-                cur.execute("INSERT INTO evidence_learning VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                            (fid(ev), lid))
+                cur.execute(
+                    "INSERT INTO evidence_learning (evidence_id, learning_id) VALUES (%s, %s) "
+                    "ON CONFLICT DO NOTHING",
+                    (fid(ev), lid),
+                )
             _tags(cur, "learning_tag", "learning_id", lid, ln.get("tags", []))
             _provenance(cur, "learning", lid, ln["id"],
                         attester if ln["state"] == "attested" else None)
@@ -802,7 +894,7 @@ def load(conn: psycopg.Connection, fixtures: Path = DEFAULT_FIXTURES, *,
             did = fid(r["decision_id"])
             cur.execute(
                 "INSERT INTO review (id, decision_id, due_on, done_on, verdict, notes, reviewed_by) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
                 (fid(r["id"]), did, r["due_on"], r.get("done_on"), r.get("verdict"),
                  r.get("notes"), deciders[did] if r.get("done_on") else None),
             )
@@ -817,12 +909,12 @@ def main() -> None:
     parser.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
     args = parser.parse_args()
 
-    extra: list[tuple[str, str]] = []
-    if args.people:
-        with args.people.open(encoding="utf-8", newline="") as handle:
-            extra = [(row["name"], row["email"]) for row in csv.DictReader(handle)]
-    with psycopg.connect(args.database_url) as conn:
-        load(conn, args.fixtures, attested_by_email=args.attested_by, extra_people=extra)
+    try:
+        extra = read_people(args.people) if args.people else []
+        with psycopg.connect(args.database_url) as conn:
+            load(conn, args.fixtures, attested_by_email=args.attested_by, extra_people=extra)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     print(f"Carga concluída ({len(extra)} pessoa(s) além das fixtures).")
 
 
@@ -835,7 +927,7 @@ if __name__ == "__main__":
 ```bash
 .venv/bin/python -m pytest server/tests_real -q
 ```
-Esperado: 6 passed.
+Esperado: 9 passed.
 
 **Passo 5: `.gitignore`.** Acrescente:
 
